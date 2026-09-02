@@ -8,7 +8,9 @@ Zoho Inventory's API has no direct "Stock Summary" report endpoint, so this
 approximates it using the Items API: the items *list* endpoint doesn't
 include per-warehouse stock, so for every active item we fetch its full
 detail record (which does include a `warehouses` array) and keep the entry
-matching WAREHOUSE_NAME.
+matching WAREHOUSE_NAME. Detail lookups run concurrently and print progress
+as they complete; the access token is refreshed automatically if a run
+takes long enough to approach the 1-hour token expiry.
 
 Required environment variables:
     ZOHO_CLIENT_ID
@@ -24,7 +26,9 @@ Optional environment variables:
 """
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -34,6 +38,9 @@ from openpyxl import Workbook
 ACCOUNTS_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 OUTPUT_COLUMNS = ["BAR CODE", "SKU", "Item Name", "SOH", "Sales Price", "Brand"]
 BARCODE_FIELDS = ("upc", "ean", "isbn", "part_number")
+TOKEN_REFRESH_INTERVAL_SECONDS = 45 * 60  # access tokens expire after 1 hour
+DETAIL_FETCH_WORKERS = 6
+PROGRESS_EVERY = 100
 
 
 def get_access_token():
@@ -52,6 +59,22 @@ def get_access_token():
     if "access_token" not in data:
         raise RuntimeError(f"Zoho did not return an access token: {data}")
     return data["access_token"], data["api_domain"]
+
+
+class TokenStore:
+    """Thread-safe access token holder that transparently refreshes long-running jobs."""
+
+    def __init__(self, access_token):
+        self._lock = threading.Lock()
+        self._token = access_token
+        self._issued_at = time.monotonic()
+
+    def get(self):
+        with self._lock:
+            if time.monotonic() - self._issued_at > TOKEN_REFRESH_INTERVAL_SECONDS:
+                self._token, _ = get_access_token()
+                self._issued_at = time.monotonic()
+            return self._token
 
 
 def resolve_organization_id(session, api_domain):
@@ -97,11 +120,12 @@ def fetch_active_item_ids(session, api_domain, organization_id):
     return item_ids
 
 
-def fetch_item_detail(session, api_domain, organization_id, item_id):
+def fetch_item_detail(session, api_domain, organization_id, token_store, item_id):
     for attempt in range(4):
         response = session.get(
             f"{api_domain}/inventory/v1/items/{item_id}",
             params={"organization_id": organization_id},
+            headers={"Authorization": f"Zoho-oauthtoken {token_store.get()}"},
             timeout=30,
         )
         if response.status_code == 429 and attempt < 3:
@@ -112,12 +136,26 @@ def fetch_item_detail(session, api_domain, organization_id, item_id):
     response.raise_for_status()
 
 
-def fetch_active_items(session, api_domain, organization_id):
+def fetch_active_items(session, api_domain, organization_id, token_store):
     item_ids = fetch_active_item_ids(session, api_domain, organization_id)
-    return [
-        fetch_item_detail(session, api_domain, organization_id, item_id)
-        for item_id in item_ids
-    ]
+    print(f"Found {len(item_ids)} active item(s); fetching per-warehouse stock detail...", flush=True)
+
+    items = []
+    completed = 0
+    with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as executor:
+        futures = {
+            executor.submit(
+                fetch_item_detail, session, api_domain, organization_id, token_store, item_id
+            ): item_id
+            for item_id in item_ids
+        }
+        for future in as_completed(futures):
+            items.append(future.result())
+            completed += 1
+            if completed % PROGRESS_EVERY == 0 or completed == len(item_ids):
+                print(f"  ...{completed}/{len(item_ids)} items fetched", flush=True)
+
+    return items
 
 
 def find_custom_field(item, *label_fragments):
@@ -182,11 +220,12 @@ def main():
     output_path = f"SOH_{report_date.strftime('%d_%m_%Y')}.xlsx"
 
     access_token, api_domain = get_access_token()
+    token_store = TokenStore(access_token)
     session = requests.Session()
     session.headers["Authorization"] = f"Zoho-oauthtoken {access_token}"
 
     organization_id = resolve_organization_id(session, api_domain)
-    items = fetch_active_items(session, api_domain, organization_id)
+    items = fetch_active_items(session, api_domain, organization_id, token_store)
     rows = build_rows(items, warehouse_name)
 
     if not rows:

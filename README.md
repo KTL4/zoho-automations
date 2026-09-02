@@ -36,3 +36,11 @@ per-warehouse stock figures instead. This should match the UI report in
 standard setups, but hasn't been verified against the exact "Bills &
 Invoices" stock-tracking mode — spot-check the first run's numbers against
 the Zoho Inventory UI.
+
+Because the per-warehouse stock breakdown is only on each item's *detail*
+endpoint (not the list endpoint), the script makes one API call per active
+item — expect the run time to scale with catalog size. It fetches details
+concurrently and logs progress every 100 items so this is visible live in
+the workflow run's logs. The job has a 30-minute timeout as a safety cap;
+if a run is regularly hitting that, the catalog may be large enough to need
+a higher `DETAIL_FETCH_WORKERS` value in the script.
