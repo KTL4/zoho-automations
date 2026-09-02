@@ -9,6 +9,7 @@ on:
 jobs:
   generate-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +26,7 @@ jobs:
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           ZOHO_ORGANIZATION_ID: ${{ secrets.ZOHO_ORGANIZATION_ID }}
           WAREHOUSE_NAME: "Store 1"
-        run: python scripts/soh_daily_report.py
+        run: python -u scripts/soh_daily_report.py
 
       - uses: actions/upload-artifact@v4
         with:
