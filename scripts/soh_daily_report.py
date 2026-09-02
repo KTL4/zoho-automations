@@ -5,9 +5,10 @@ Pulls current stock-on-hand for a given warehouse from Zoho Inventory and
 writes it to an Excel file named SOH_DD_MM_YYYY.xlsx.
 
 Zoho Inventory's API has no direct "Stock Summary" report endpoint, so this
-approximates it using the Items API: for every active item, it reads the
-per-warehouse stock figures embedded in that item's `warehouses` array and
-keeps the entry matching WAREHOUSE_NAME.
+approximates it using the Items API: the items *list* endpoint doesn't
+include per-warehouse stock, so for every active item we fetch its full
+detail record (which does include a `warehouses` array) and keep the entry
+matching WAREHOUSE_NAME.
 
 Required environment variables:
     ZOHO_CLIENT_ID
@@ -23,6 +24,7 @@ Optional environment variables:
 """
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -70,8 +72,8 @@ def resolve_organization_id(session, api_domain):
     )
 
 
-def fetch_active_items(session, api_domain, organization_id):
-    items = []
+def fetch_active_item_ids(session, api_domain, organization_id):
+    item_ids = []
     page = 1
     while True:
         response = session.get(
@@ -86,13 +88,36 @@ def fetch_active_items(session, api_domain, organization_id):
         )
         response.raise_for_status()
         payload = response.json()
-        items.extend(payload.get("items", []))
+        item_ids.extend(item["item_id"] for item in payload.get("items", []))
 
         if not payload.get("page_context", {}).get("has_more_page"):
             break
         page += 1
 
-    return items
+    return item_ids
+
+
+def fetch_item_detail(session, api_domain, organization_id, item_id):
+    for attempt in range(4):
+        response = session.get(
+            f"{api_domain}/inventory/v1/items/{item_id}",
+            params={"organization_id": organization_id},
+            timeout=30,
+        )
+        if response.status_code == 429 and attempt < 3:
+            time.sleep(2**attempt)
+            continue
+        response.raise_for_status()
+        return response.json()["item"]
+    response.raise_for_status()
+
+
+def fetch_active_items(session, api_domain, organization_id):
+    item_ids = fetch_active_item_ids(session, api_domain, organization_id)
+    return [
+        fetch_item_detail(session, api_domain, organization_id, item_id)
+        for item_id in item_ids
+    ]
 
 
 def find_custom_field(item, *label_fragments):
@@ -165,8 +190,16 @@ def main():
     rows = build_rows(items, warehouse_name)
 
     if not rows:
+        seen_warehouses = sorted(
+            {
+                warehouse.get("warehouse_name", "")
+                for item in items
+                for warehouse in (item.get("warehouses") or [])
+            }
+        )
         print(
-            f"Warning: no active items found stocked at warehouse '{warehouse_name}'.",
+            f"Warning: no active items found stocked at warehouse '{warehouse_name}'. "
+            f"Checked {len(items)} active item(s); warehouse names seen: {seen_warehouses}",
             file=sys.stderr,
         )
 
