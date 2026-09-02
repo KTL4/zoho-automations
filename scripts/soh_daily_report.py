@@ -8,8 +8,11 @@ Zoho Inventory's API has no direct "Stock Summary" report endpoint, so this
 approximates it using the Items API: the items *list* endpoint doesn't
 include per-warehouse stock, so for every active item we fetch its full
 detail record (which does include a `warehouses` array) and keep the entry
-matching WAREHOUSE_NAME. Detail lookups run concurrently and print progress
-as they complete; the access token is refreshed automatically if a run
+matching WAREHOUSE_NAME. Detail lookups run concurrently, print progress
+every 100 items plus a heartbeat every 20 seconds (so a stalled run is
+visible in real time rather than going silent), retry network errors and
+429s with backoff, and skip (rather than crash on) any item that still
+fails after retries. The access token is refreshed automatically if a run
 takes long enough to approach the 1-hour token expiry.
 
 Required environment variables:
@@ -41,6 +44,7 @@ BARCODE_FIELDS = ("upc", "ean", "isbn", "part_number")
 TOKEN_REFRESH_INTERVAL_SECONDS = 45 * 60  # access tokens expire after 1 hour
 DETAIL_FETCH_WORKERS = 6
 PROGRESS_EVERY = 100
+HEARTBEAT_SECONDS = 20
 
 
 def get_access_token():
@@ -121,19 +125,39 @@ def fetch_active_item_ids(session, api_domain, organization_id):
 
 
 def fetch_item_detail(session, api_domain, organization_id, token_store, item_id):
+    last_error = None
     for attempt in range(4):
-        response = session.get(
-            f"{api_domain}/inventory/v1/items/{item_id}",
-            params={"organization_id": organization_id},
-            headers={"Authorization": f"Zoho-oauthtoken {token_store.get()}"},
-            timeout=30,
-        )
-        if response.status_code == 429 and attempt < 3:
+        try:
+            response = session.get(
+                f"{api_domain}/inventory/v1/items/{item_id}",
+                params={"organization_id": organization_id},
+                headers={"Authorization": f"Zoho-oauthtoken {token_store.get()}"},
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            print(f"  [item {item_id}] attempt {attempt + 1} network error: {exc}", file=sys.stderr, flush=True)
             time.sleep(2**attempt)
             continue
-        response.raise_for_status()
+
+        if response.status_code == 429:
+            last_error = requests.exceptions.HTTPError(f"429 Too Many Requests for item {item_id}")
+            print(f"  [item {item_id}] attempt {attempt + 1} rate-limited (429), backing off", file=sys.stderr, flush=True)
+            time.sleep(2**attempt)
+            continue
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            last_error = exc
+            print(f"  [item {item_id}] attempt {attempt + 1} HTTP error: {exc}", file=sys.stderr, flush=True)
+            time.sleep(2**attempt)
+            continue
+
         return response.json()["item"]
-    response.raise_for_status()
+
+    print(f"  [item {item_id}] giving up after 4 attempts: {last_error}", file=sys.stderr, flush=True)
+    return None
 
 
 def fetch_active_items(session, api_domain, organization_id, token_store):
@@ -142,18 +166,42 @@ def fetch_active_items(session, api_domain, organization_id, token_store):
 
     items = []
     completed = 0
-    with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as executor:
-        futures = {
-            executor.submit(
-                fetch_item_detail, session, api_domain, organization_id, token_store, item_id
-            ): item_id
-            for item_id in item_ids
-        }
-        for future in as_completed(futures):
-            items.append(future.result())
-            completed += 1
-            if completed % PROGRESS_EVERY == 0 or completed == len(item_ids):
-                print(f"  ...{completed}/{len(item_ids)} items fetched", flush=True)
+    failed = 0
+    stop_heartbeat = threading.Event()
+
+    def heartbeat():
+        while not stop_heartbeat.wait(HEARTBEAT_SECONDS):
+            print(
+                f"  ...still working: {completed}/{len(item_ids)} fetched ({failed} failed so far)",
+                flush=True,
+            )
+
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as executor:
+            futures = {
+                executor.submit(
+                    fetch_item_detail, session, api_domain, organization_id, token_store, item_id
+                ): item_id
+                for item_id in item_ids
+            }
+            for future in as_completed(futures):
+                detail = future.result()
+                completed += 1
+                if detail is None:
+                    failed += 1
+                else:
+                    items.append(detail)
+                if completed % PROGRESS_EVERY == 0 or completed == len(item_ids):
+                    print(f"  ...{completed}/{len(item_ids)} items fetched ({failed} failed)", flush=True)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join()
+
+    if failed:
+        print(f"Warning: {failed} item(s) could not be fetched after retries and were skipped.", file=sys.stderr, flush=True)
 
     return items
 
