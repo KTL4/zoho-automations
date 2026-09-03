@@ -8,12 +8,16 @@ Zoho Inventory's API has no direct "Stock Summary" report endpoint, so this
 approximates it using the Items API: the items *list* endpoint doesn't
 include per-warehouse stock, so for every active item we fetch its full
 detail record (which does include a `warehouses` array) and keep the entry
-matching WAREHOUSE_NAME. Detail lookups run concurrently, print progress
-every 100 items plus a heartbeat every 20 seconds (so a stalled run is
-visible in real time rather than going silent), retry network errors and
-429s with backoff, and skip (rather than crash on) any item that still
-fails after retries. The access token is refreshed automatically if a run
-takes long enough to approach the 1-hour token expiry.
+matching WAREHOUSE_NAME. Detail lookups run concurrently, paced by a shared
+rate limiter to stay under Zoho's request quota (a live run against ~1850
+items crashed with a 429 after being throttled for the better part of 30
+minutes, which is what the rate limiter and Retry-After handling below are
+for), print progress every 100 items plus a heartbeat every 20 seconds (so
+a stalled run is visible in real time rather than going silent), retry
+network errors and 429s with backoff, and skip (rather than crash on) any
+item that still fails after retries. The access token is refreshed
+automatically if a run takes long enough to approach the 1-hour token
+expiry.
 
 Required environment variables:
     ZOHO_CLIENT_ID
@@ -21,11 +25,12 @@ Required environment variables:
     ZOHO_REFRESH_TOKEN
 
 Optional environment variables:
-    ZOHO_ORGANIZATION_ID  - required if the Zoho account has more than one
-                             organization (auto-detected otherwise)
-    WAREHOUSE_NAME         - defaults to "Store 1"
-    REPORT_TZ              - IANA timezone for naming the output file,
-                              defaults to "Africa/Nairobi"
+    ZOHO_ORGANIZATION_ID   - required if the Zoho account has more than one
+                              organization (auto-detected otherwise)
+    WAREHOUSE_NAME          - defaults to "Store 1"
+    REPORT_TZ               - IANA timezone for naming the output file,
+                               defaults to "Africa/Nairobi"
+    RATE_LIMIT_PER_MINUTE   - max Zoho API requests/minute, defaults to 60
 """
 import os
 import sys
@@ -45,6 +50,9 @@ TOKEN_REFRESH_INTERVAL_SECONDS = 45 * 60  # access tokens expire after 1 hour
 DETAIL_FETCH_WORKERS = 6
 PROGRESS_EVERY = 100
 HEARTBEAT_SECONDS = 20
+RETRY_ATTEMPTS = 6
+DEFAULT_RATE_LIMIT_PER_MINUTE = 60
+MAX_RETRY_AFTER_SECONDS = 90
 
 
 def get_access_token():
@@ -79,6 +87,30 @@ class TokenStore:
                 self._token, _ = get_access_token()
                 self._issued_at = time.monotonic()
             return self._token
+
+
+class RateLimiter:
+    """Paces requests across all worker threads to a fixed rate per minute.
+
+    A short per-item exponential backoff isn't enough to recover from a
+    sustained rate limit (a live run got 429'd for the better part of 30
+    minutes and then crashed) -- this caps how fast requests actually go
+    out in the first place.
+    """
+
+    def __init__(self, max_per_minute):
+        self._lock = threading.Lock()
+        self._interval = 60.0 / max_per_minute
+        self._next_slot = time.monotonic()
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_slot)
+            self._next_slot = start + self._interval
+        sleep_for = start - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
 
 
 def resolve_organization_id(session, api_domain):
@@ -124,9 +156,20 @@ def fetch_active_item_ids(session, api_domain, organization_id):
     return item_ids
 
 
-def fetch_item_detail(session, api_domain, organization_id, token_store, item_id):
+def parse_retry_after(response, attempt):
+    header_value = response.headers.get("Retry-After")
+    if header_value is not None:
+        try:
+            return min(float(header_value), MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass
+    return min(2**attempt, MAX_RETRY_AFTER_SECONDS)
+
+
+def fetch_item_detail(session, api_domain, organization_id, token_store, rate_limiter, item_id):
     last_error = None
-    for attempt in range(4):
+    for attempt in range(RETRY_ATTEMPTS):
+        rate_limiter.wait()
         try:
             response = session.get(
                 f"{api_domain}/inventory/v1/items/{item_id}",
@@ -137,13 +180,14 @@ def fetch_item_detail(session, api_domain, organization_id, token_store, item_id
         except requests.exceptions.RequestException as exc:
             last_error = exc
             print(f"  [item {item_id}] attempt {attempt + 1} network error: {exc}", file=sys.stderr, flush=True)
-            time.sleep(2**attempt)
+            time.sleep(min(2**attempt, MAX_RETRY_AFTER_SECONDS))
             continue
 
         if response.status_code == 429:
+            wait_s = parse_retry_after(response, attempt)
             last_error = requests.exceptions.HTTPError(f"429 Too Many Requests for item {item_id}")
-            print(f"  [item {item_id}] attempt {attempt + 1} rate-limited (429), backing off", file=sys.stderr, flush=True)
-            time.sleep(2**attempt)
+            print(f"  [item {item_id}] attempt {attempt + 1} rate-limited (429), waiting {wait_s:.1f}s", file=sys.stderr, flush=True)
+            time.sleep(wait_s)
             continue
 
         try:
@@ -151,16 +195,16 @@ def fetch_item_detail(session, api_domain, organization_id, token_store, item_id
         except requests.exceptions.HTTPError as exc:
             last_error = exc
             print(f"  [item {item_id}] attempt {attempt + 1} HTTP error: {exc}", file=sys.stderr, flush=True)
-            time.sleep(2**attempt)
+            time.sleep(min(2**attempt, MAX_RETRY_AFTER_SECONDS))
             continue
 
         return response.json()["item"]
 
-    print(f"  [item {item_id}] giving up after 4 attempts: {last_error}", file=sys.stderr, flush=True)
+    print(f"  [item {item_id}] giving up after {RETRY_ATTEMPTS} attempts: {last_error}", file=sys.stderr, flush=True)
     return None
 
 
-def fetch_active_items(session, api_domain, organization_id, token_store):
+def fetch_active_items(session, api_domain, organization_id, token_store, rate_limiter):
     item_ids = fetch_active_item_ids(session, api_domain, organization_id)
     print(f"Found {len(item_ids)} active item(s); fetching per-warehouse stock detail...", flush=True)
 
@@ -183,7 +227,7 @@ def fetch_active_items(session, api_domain, organization_id, token_store):
         with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as executor:
             futures = {
                 executor.submit(
-                    fetch_item_detail, session, api_domain, organization_id, token_store, item_id
+                    fetch_item_detail, session, api_domain, organization_id, token_store, rate_limiter, item_id
                 ): item_id
                 for item_id in item_ids
             }
@@ -267,13 +311,16 @@ def main():
     report_date = datetime.now(report_tz) - timedelta(days=1)
     output_path = f"SOH_{report_date.strftime('%d_%m_%Y')}.xlsx"
 
+    rate_limit_per_minute = int(os.environ.get("RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE))
+    rate_limiter = RateLimiter(rate_limit_per_minute)
+
     access_token, api_domain = get_access_token()
     token_store = TokenStore(access_token)
     session = requests.Session()
     session.headers["Authorization"] = f"Zoho-oauthtoken {access_token}"
 
     organization_id = resolve_organization_id(session, api_domain)
-    items = fetch_active_items(session, api_domain, organization_id, token_store)
+    items = fetch_active_items(session, api_domain, organization_id, token_store, rate_limiter)
     rows = build_rows(items, warehouse_name)
 
     if not rows:

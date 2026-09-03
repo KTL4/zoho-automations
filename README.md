@@ -40,18 +40,24 @@ the Zoho Inventory UI.
 Because the per-warehouse stock breakdown is only on each item's *detail*
 endpoint (not the list endpoint), the script makes one API call per active
 item — expect the run time to scale with catalog size (the live Store 1
-catalog has ~1,850 active items). It fetches details concurrently, logs
+catalog has ~1,850 active items). It fetches details concurrently, paced
+by a shared rate limiter (`RATE_LIMIT_PER_MINUTE`, default 60/min), logs
 progress every 100 items, and logs a heartbeat every 20 seconds so a
 stalled run is visible in real time in the workflow's logs rather than
 going silent. Network errors and rate-limit (429) responses are retried
-with backoff; an item that still fails after retries is logged and
-skipped rather than crashing the whole report. The job has a 45-minute
-timeout as a safety cap.
+with backoff (honoring the `Retry-After` header when Zoho sends one); an
+item that still fails after retries is logged and skipped rather than
+crashing the whole report. The job has a 45-minute timeout as a safety cap
+(1,850 items at 60/min is ~31 minutes before any retries, so there's
+headroom).
 
-A run on 2026-09-02 stalled completely after ~100/1850 items with no
-errors logged, which the previous version of the script had no visibility
-into (no heartbeat, no per-item error logging) — it just went silent until
-the job timeout killed it. If this recurs, the heartbeat and per-item error
-logs added since should show whether it's sustained Zoho rate-limiting
-(steady 429 messages) or something else, which will tell us whether to
-lower `DETAIL_FETCH_WORKERS`, add a rate limiter, or look at another cause.
+**Root cause found on 2026-09-03:** the scheduled run crashed with
+`requests.exceptions.HTTPError: 429` after being throttled by Zoho for
+close to 30 minutes straight — the account's real request rate limit is
+apparently well below what firing 6 concurrent, unpaced requests produces.
+The earlier version only backed off for a few seconds per item, which
+isn't enough to recover from *sustained* throttling. The rate limiter
+above paces every request (across all worker threads) to a fixed budget
+instead of letting the workers fire as fast as they can and hoping
+short backoffs are enough. If 429s still show up frequently in the logs
+after this change, lower `RATE_LIMIT_PER_MINUTE` further.
