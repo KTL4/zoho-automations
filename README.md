@@ -39,8 +39,19 @@ the Zoho Inventory UI.
 
 Because the per-warehouse stock breakdown is only on each item's *detail*
 endpoint (not the list endpoint), the script makes one API call per active
-item — expect the run time to scale with catalog size. It fetches details
-concurrently and logs progress every 100 items so this is visible live in
-the workflow run's logs. The job has a 30-minute timeout as a safety cap;
-if a run is regularly hitting that, the catalog may be large enough to need
-a higher `DETAIL_FETCH_WORKERS` value in the script.
+item — expect the run time to scale with catalog size (the live Store 1
+catalog has ~1,850 active items). It fetches details concurrently, logs
+progress every 100 items, and logs a heartbeat every 20 seconds so a
+stalled run is visible in real time in the workflow's logs rather than
+going silent. Network errors and rate-limit (429) responses are retried
+with backoff; an item that still fails after retries is logged and
+skipped rather than crashing the whole report. The job has a 45-minute
+timeout as a safety cap.
+
+A run on 2026-09-02 stalled completely after ~100/1850 items with no
+errors logged, which the previous version of the script had no visibility
+into (no heartbeat, no per-item error logging) — it just went silent until
+the job timeout killed it. If this recurs, the heartbeat and per-item error
+logs added since should show whether it's sustained Zoho rate-limiting
+(steady 429 messages) or something else, which will tell us whether to
+lower `DETAIL_FETCH_WORKERS`, add a rate limiter, or look at another cause.
