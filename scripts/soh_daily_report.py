@@ -42,6 +42,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 ACCOUNTS_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 OUTPUT_COLUMNS = ["BAR CODE", "SKU", "Item Name", "SOH", "Sales Price", "Brand"]
@@ -297,8 +299,32 @@ def write_excel(rows, output_path):
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(OUTPUT_COLUMNS)
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="305496", end_color="305496", fill_type="solid")
+    for cell in sheet[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+    sheet.freeze_panes = "A2"
+
     for row in rows:
         sheet.append([row[column] for column in OUTPUT_COLUMNS])
+
+    soh_col = OUTPUT_COLUMNS.index("SOH") + 1
+    price_col = OUTPUT_COLUMNS.index("Sales Price") + 1
+    for row_idx in range(2, len(rows) + 2):
+        sheet.cell(row=row_idx, column=soh_col).number_format = "#,##0"
+        sheet.cell(row=row_idx, column=price_col).number_format = "#,##0.00"
+
+    for col_idx, column_name in enumerate(OUTPUT_COLUMNS, start=1):
+        longest = max(
+            [len(column_name)] + [len(str(row[column_name])) for row in rows],
+            default=len(column_name),
+        )
+        sheet.column_dimensions[get_column_letter(col_idx)].width = longest + 4
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     workbook.save(output_path)
 
 
@@ -309,7 +335,7 @@ def main():
     # This job runs early morning after Store 1 has closed, so the report
     # date is "yesterday" in the business's local timezone.
     report_date = datetime.now(report_tz) - timedelta(days=1)
-    output_path = f"SOH_{report_date.strftime('%d_%m_%Y')}.xlsx"
+    output_path = f"reports/SOH_{report_date.strftime('%d_%m_%Y')}.xlsx"
 
     rate_limit_per_minute = int(os.environ.get("RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE))
     rate_limiter = RateLimiter(rate_limit_per_minute)
