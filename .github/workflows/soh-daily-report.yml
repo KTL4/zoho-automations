@@ -6,6 +6,9 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   generate-report:
     runs-on: ubuntu-latest
@@ -28,8 +31,15 @@ jobs:
           WAREHOUSE_NAME: "Store 1"
         run: python -u scripts/soh_daily_report.py
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: soh-daily-report
-          path: SOH_*.xlsx
-          retention-days: 90
+      - name: Commit report to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/*.xlsx
+          if ! git diff --staged --quiet; then
+            git commit -m "Add SOH report for $(date -u +%F)"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          else
+            echo "No report changes to commit."
+          fi

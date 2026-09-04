@@ -24,11 +24,15 @@ authentication error, generate a fresh one from the same Self Client.
 `scripts/soh_daily_report.py`, run daily at 06:00 East Africa Time by
 `.github/workflows/soh-daily-report.yml`.
 
-Produces `SOH_DD_MM_YYYY.xlsx` (dated for the previous day, since the job
-runs after Store 1 closes) with columns: BAR CODE, SKU, Item Name, SOH,
-Sales Price, Brand — one row per active item stocked at "Store 1". The file
-is attached to the workflow run as a downloadable artifact (retained 90
-days); it is not committed to the repo or emailed anywhere.
+Produces `reports/SOH_DD_MM_YYYY.xlsx` (dated for the previous day, since
+the job runs after Store 1 closes) with columns: BAR CODE, SKU, Item Name,
+SOH, Sales Price, Brand — one row per active item stocked at "Store 1",
+with a bold header row, frozen header, sized columns, and number
+formatting. The workflow commits the file straight into the `reports/`
+folder on `main` (requires `permissions: contents: write`, already set in
+the workflow) — no manual download from the Actions UI needed; anyone with
+repo access has it via a normal `git pull`, and it stays in version
+history for good.
 
 **Note:** Zoho Inventory's API has no direct endpoint for the "Stock
 Summary" report shown in the web UI, so this is built from the Items API's
