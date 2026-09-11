@@ -65,3 +65,54 @@ above paces every request (across all worker threads) to a fixed budget
 instead of letting the workers fire as fast as they can and hoping
 short backoffs are enough. If 429s still show up frequently in the logs
 after this change, lower `RATE_LIMIT_PER_MINUTE` further.
+
+## Item Runway Report
+
+`scripts/item_runway_report.py`, run at 06:00 East Africa Time on the 1st
+of each month by `.github/workflows/item-runway-report.yml`. Replicates
+Zoho Inventory's Reports > Sales by Item, with date range "Previous week"
+compared against 35 previous periods.
+
+Produces `reports/Sales_by_item(<mon>).xlsx` (e.g. `Sales_by_item(sep).xlsx`,
+named for the month the most recent of the 35 weeks falls in) with columns
+SKU, Item Name, Brand, then one column per week (`WK <n>`, oldest to
+newest, labeled with that week's ISO week-of-year number) — one row per
+active item, including items with zero sales in every week, since the
+point of a runway report is to also surface what isn't moving. Same bold
+header / frozen header / sized columns / number formatting as the SOH
+report, and the workflow commits straight into `reports/` on `main` the
+same way.
+
+**Assumptions baked into this report** (documented in the script's
+docstring too) — verify the first run's numbers against the real Zoho UI
+report before trusting the automation, per the project's testing
+convention:
+- "Sales by Item" quantity = **invoiced** quantity (draft/void invoices
+  excluded), not booked sales-order quantity.
+- Covers **all warehouses/locations combined**, not a single store.
+- Weeks run **Monday-Sunday**.
+- The item list is scoped to **active items** (`Status.Active`), matching
+  the SOH report's convention.
+
+**Note:** like the SOH report, Zoho Inventory's API has no direct "Sales
+by Item" report endpoint — a Zoho community thread confirms this gap
+generally ("this functionality exists in the Reports interface, but there
+is no API available for it"). So this is built from transactional data
+instead:
+
+1. The full active item catalog is fetched (list + per-item detail, same
+   approach as the SOH report) to get SKU/Item Name/Brand for every item.
+2. Every non-draft, non-void invoice dated in the 35-week window is listed
+   (cheap — paginated, sorted newest-first, and pagination stops as soon
+   as it walks past the window) and then fetched in full, one call per
+   invoice, to get its line items.
+3. Each line item's quantity is summed into the week its invoice date
+   falls in.
+
+Both the catalog fetch and the invoice-detail fetch reuse the exact same
+rate limiter, heartbeat logging, and retry-with-backoff pattern that fixed
+the SOH report's production 429 crash (see above) — invoice volume over a
+35-week window is not bounded the way the item catalog is, so this can
+end up making significantly more API calls than the SOH report does. The
+job has a generous 180-minute timeout to accommodate that; tighten it once
+a real run shows the actual volume.
