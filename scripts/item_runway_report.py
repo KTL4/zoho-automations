@@ -2,7 +2,7 @@
 Item Runway Report
 
 Replicates Zoho Inventory's "Sales by Item" report (Reports > Sales by Item,
-date range "Previous week", compared with "Previous periods", 35 periods)
+date range "Previous week", compared with "Previous periods", 14 periods)
 and writes it to an Excel file named Sales_by_item(<mon>).xlsx.
 
 Zoho Inventory's API has no direct "Sales by Item" report endpoint (same
@@ -11,15 +11,19 @@ so this is built from the underlying transactional data instead:
 
   1. The full active item catalog is fetched (list + per-item detail, same
      approach as soh_daily_report.py) to get SKU / Item Name / Brand for
-     every item -- including items with zero sales, since a runway report
-     needs to show what *isn't* moving, not just what sold.
-  2. Every non-draft, non-void invoice dated within the 35-week window is
+     every item, restricted to stock-tracked ("inventory" type) items --
+     this drops non-sellable catalog entries like freight/container line
+     items (e.g. "20FT Container") that aren't part of physical stock.
+  2. Every non-draft, non-void invoice dated within the 14-week window is
      listed (cheap, paginated, sorted newest-first so pagination can stop
      as soon as it walks past the window) and then fetched in full (one
      call per invoice, same as the per-item calls in the SOH report) to
      get its line items.
   3. Each line item's quantity is summed into the Monday-Sunday week its
      invoice date falls in.
+  4. Items with zero sales across the entire window are dropped from the
+     output -- the report only lists items that actually sold at least
+     once in the last 14 weeks.
 
 Both the catalog fetch and the invoice detail fetch hit the API far harder
 than a naive loop can survive -- soh_daily_report.py's production run once
@@ -35,7 +39,9 @@ this automation (per the project's testing convention):
   - Weeks run Monday-Sunday; each week's column header is that week's ISO
     week-of-year number (e.g. "WK 36"), oldest week leftmost.
   - The catalog is scoped to active items (Status.Active), matching the
-    SOH report's convention.
+    SOH report's convention, further restricted to item_type == "inventory"
+    to exclude non-sellable/non-stock catalog entries. An item missing the
+    item_type field entirely is kept rather than dropped, to fail open.
 
 Required environment variables:
     ZOHO_CLIENT_ID
@@ -66,7 +72,8 @@ from openpyxl.utils import get_column_letter
 
 ACCOUNTS_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 STATIC_COLUMNS = ["SKU", "Item Name", "Brand"]
-NUM_PERIODS = 35
+NUM_PERIODS = 14
+STOCK_ITEM_TYPE = "inventory"
 EXCLUDED_INVOICE_STATUSES = {"draft", "void"}
 INVOICE_LIST_PAGE_SIZE = 200
 TOKEN_REFRESH_INTERVAL_SECONDS = 45 * 60  # access tokens expire after 1 hour
@@ -285,6 +292,18 @@ def extract_brand(item):
     return item.get("brand") or find_custom_field(item, "brand")
 
 
+def is_stock_item(item):
+    """True for physical, stock-tracked items -- excludes non-sellable
+    catalog entries like freight/container line items (item_type values
+    such as "purchases" or "service") that aren't part of physical stock
+    and shouldn't appear in a stock-runway report. An item missing the
+    item_type field entirely is kept rather than dropped, to fail open."""
+    item_type = (item.get("item_type") or "").strip().lower()
+    if not item_type:
+        return True
+    return item_type == STOCK_ITEM_TYPE
+
+
 def build_item_catalog(session, api_domain, organization_id, token_store, rate_limiter):
     item_ids = fetch_active_item_ids(session, api_domain, organization_id)
     print(f"Found {len(item_ids)} active item(s); fetching item detail for SKU/Name/Brand...", flush=True)
@@ -300,12 +319,24 @@ def build_item_catalog(session, api_domain, organization_id, token_store, rate_l
     items = fetch_concurrently(item_ids, fetch_one, "item detail")
 
     catalog = {}
+    skipped_non_stock = 0
     for item in items:
+        if not is_stock_item(item):
+            skipped_non_stock += 1
+            continue
         catalog[item["item_id"]] = {
             "SKU": item.get("sku", ""),
             "Item Name": item.get("name", ""),
             "Brand": extract_brand(item),
         }
+
+    if skipped_non_stock:
+        print(
+            f"Excluded {skipped_non_stock} non-stock item(s) (e.g. freight/container line items) "
+            "from the catalog.",
+            flush=True,
+        )
+
     return catalog
 
 
@@ -403,13 +434,16 @@ def build_rows(catalog, sales, buckets):
     rows = []
     for item_id, info in catalog.items():
         quantities = sales.get(item_id, [0] * len(buckets))
+        if not any(quantities):
+            continue  # no sales anywhere in the window -- omit from the report
         rows.append([info["SKU"], info["Item Name"], info["Brand"], *quantities])
 
     skipped_item_ids = set(sales) - set(catalog)
     if skipped_item_ids:
         print(
             f"Warning: {len(skipped_item_ids)} item(s) had sales in the window but are not in the "
-            "active item catalog (likely discontinued); their sales were excluded from the report.",
+            "active/stock-tracked item catalog (likely discontinued or non-stock); their sales were "
+            "excluded from the report.",
             file=sys.stderr,
         )
 

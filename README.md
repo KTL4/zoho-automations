@@ -71,17 +71,17 @@ after this change, lower `RATE_LIMIT_PER_MINUTE` further.
 `scripts/item_runway_report.py`, run at 06:00 East Africa Time on the 1st
 of each month by `.github/workflows/item-runway-report.yml`. Replicates
 Zoho Inventory's Reports > Sales by Item, with date range "Previous week"
-compared against 35 previous periods.
+compared against 14 previous periods.
 
 Produces `reports/Sales_by_item(<mon>).xlsx` (e.g. `Sales_by_item(sep).xlsx`,
-named for the month the most recent of the 35 weeks falls in) with columns
+named for the month the most recent of the 14 weeks falls in) with columns
 SKU, Item Name, Brand, then one column per week (`WK <n>`, oldest to
-newest, labeled with that week's ISO week-of-year number) — one row per
-active item, including items with zero sales in every week, since the
-point of a runway report is to also surface what isn't moving. Same bold
-header / frozen header / sized columns / number formatting as the SOH
-report, and the workflow commits straight into `reports/` on `main` the
-same way.
+newest, labeled with that week's ISO week-of-year number). One row per
+stock-tracked item that sold at least once in the window — non-stock
+catalog entries (freight/container line items etc., see below) and items
+with zero sales across all 14 weeks are both omitted. Same bold header /
+frozen header / sized columns / number formatting as the SOH report, and
+the workflow commits straight into `reports/` on `main` the same way.
 
 **Assumptions baked into this report** (documented in the script's
 docstring too) — verify the first run's numbers against the real Zoho UI
@@ -92,7 +92,14 @@ convention:
 - Covers **all warehouses/locations combined**, not a single store.
 - Weeks run **Monday-Sunday**.
 - The item list is scoped to **active items** (`Status.Active`), matching
-  the SOH report's convention.
+  the SOH report's convention, further restricted to `item_type ==
+  "inventory"` to drop non-sellable/non-stock catalog entries (e.g. a
+  "20FT Container" freight line item showed up in the first live run,
+  which is what prompted this filter). An item missing the `item_type`
+  field entirely is kept rather than dropped, to fail open — this is a
+  best-effort heuristic and hasn't been verified against Zoho's exact
+  field semantics, so double-check it isn't silently dropping real
+  products.
 
 **Note:** like the SOH report, Zoho Inventory's API has no direct "Sales
 by Item" report endpoint — a Zoho community thread confirms this gap
@@ -101,18 +108,29 @@ is no API available for it"). So this is built from transactional data
 instead:
 
 1. The full active item catalog is fetched (list + per-item detail, same
-   approach as the SOH report) to get SKU/Item Name/Brand for every item.
-2. Every non-draft, non-void invoice dated in the 35-week window is listed
+   approach as the SOH report) to get SKU/Item Name/Brand for every item,
+   filtering out non-stock items as described above.
+2. Every non-draft, non-void invoice dated in the 14-week window is listed
    (cheap — paginated, sorted newest-first, and pagination stops as soon
    as it walks past the window) and then fetched in full, one call per
    invoice, to get its line items.
 3. Each line item's quantity is summed into the week its invoice date
    falls in.
+4. Items with zero sales across the whole window are dropped from the
+   final output.
 
 Both the catalog fetch and the invoice-detail fetch reuse the exact same
 rate limiter, heartbeat logging, and retry-with-backoff pattern that fixed
-the SOH report's production 429 crash (see above) — invoice volume over a
-35-week window is not bounded the way the item catalog is, so this can
-end up making significantly more API calls than the SOH report does. The
-job has a generous 180-minute timeout to accommodate that; tighten it once
-a real run shows the actual volume.
+the SOH report's production 429 crash (see above) — invoice volume over
+the window is not bounded the way the item catalog is, so this can end up
+making significantly more API calls than the SOH report does. The job has
+a generous 180-minute timeout to accommodate that.
+
+**First live run (2026-09-11, against a 35-period window before it was
+narrowed to 14):** completed successfully in ~1h42m against a catalog of
+1,842 active items — same order of magnitude as the SOH report's ~1,850
+items, so the catalog-fetch phase takes about as long (~30 min) as it does
+there; the rest of the time was the invoice-detail phase. With the window
+now 14 weeks instead of 35 (~40% of the date range), expect a materially
+shorter invoice-fetch phase on the next run, though the exact volume still
+depends on real invoice counts.
