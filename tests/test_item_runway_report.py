@@ -1,5 +1,6 @@
 import datetime
 import os
+import shutil
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -10,16 +11,16 @@ import item_runway_report as report  # noqa: E402
 
 
 class ComputeWeekBucketsTests(unittest.TestCase):
-    def test_35_periods_ending_with_previous_full_week(self):
+    def test_14_periods_ending_with_previous_full_week(self):
         # Wednesday 2026-10-01. That week's Monday is 2026-09-28, so the
         # "previous week" is 2026-09-21 (Mon) .. 2026-09-27 (Sun).
         today = datetime.date(2026, 10, 1)
         buckets = report.compute_week_buckets(today)
 
-        self.assertEqual(len(buckets), 35)
+        self.assertEqual(len(buckets), 14)
         self.assertEqual(buckets[-1], (datetime.date(2026, 9, 21), datetime.date(2026, 9, 27)))
-        # Oldest bucket is exactly 34 weeks before the most recent one.
-        self.assertEqual(buckets[0], (datetime.date(2026, 1, 26), datetime.date(2026, 2, 1)))
+        # Oldest bucket is exactly 13 weeks before the most recent one.
+        self.assertEqual(buckets[0], (datetime.date(2026, 6, 22), datetime.date(2026, 6, 28)))
         # Buckets are chronological and contiguous, 7 days apart.
         for (start, end) in buckets:
             self.assertEqual((end - start).days, 6)
@@ -66,7 +67,7 @@ class AggregateSalesTests(unittest.TestCase):
                 "line_items": [{"item_id": "item-1", "quantity": 2}],
             },
             {
-                "date": "2026-01-28",  # oldest bucket (2026-01-26 .. 2026-02-01)
+                "date": "2026-06-24",  # oldest bucket (2026-06-22 .. 2026-06-28)
                 "line_items": [{"item_id": "item-1", "quantity": 10}],
             },
         ]
@@ -162,21 +163,32 @@ class ExtractBrandTests(unittest.TestCase):
 
 
 class BuildRowsTests(unittest.TestCase):
-    def test_includes_zero_sales_items_and_sorts_by_name(self):
+    def test_excludes_zero_sales_items_and_sorts_remaining_by_name(self):
         catalog = {
             "item-1": {"SKU": "SKU1", "Item Name": "Zebra Widget", "Brand": "Acme"},
             "item-2": {"SKU": "SKU2", "Item Name": "Apple Widget", "Brand": "Acme"},
+            "item-3": {"SKU": "SKU3", "Item Name": "No Sales Widget", "Brand": "Acme"},
         }
         buckets = [(datetime.date(2026, 1, 1), datetime.date(2026, 1, 7))]
-        sales = {"item-1": [5]}
+        sales = {"item-1": [5], "item-2": [0]}
 
         rows = report.build_rows(catalog, sales, buckets)
 
-        self.assertEqual([row[1] for row in rows], ["Apple Widget", "Zebra Widget"])
-        apple_row = next(row for row in rows if row[1] == "Apple Widget")
-        self.assertEqual(apple_row[3], 0)
-        zebra_row = next(row for row in rows if row[1] == "Zebra Widget")
-        self.assertEqual(zebra_row[3], 5)
+        # item-2 (all-zero sales) and item-3 (no sales at all) are both omitted.
+        self.assertEqual([row[1] for row in rows], ["Zebra Widget"])
+        self.assertEqual(rows[0][3], 5)
+
+    def test_item_with_any_nonzero_week_is_kept(self):
+        catalog = {"item-1": {"SKU": "SKU1", "Item Name": "Widget", "Brand": "Acme"}}
+        buckets = [
+            (datetime.date(2026, 1, 1), datetime.date(2026, 1, 7)),
+            (datetime.date(2026, 1, 8), datetime.date(2026, 1, 14)),
+        ]
+        sales = {"item-1": [0, 3]}
+
+        rows = report.build_rows(catalog, sales, buckets)
+
+        self.assertEqual(len(rows), 1)
 
     def test_sales_for_items_outside_catalog_are_dropped_with_warning(self):
         catalog = {"item-1": {"SKU": "SKU1", "Item Name": "Widget", "Brand": "Acme"}}
@@ -187,6 +199,66 @@ class BuildRowsTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][1], "Widget")
+
+
+class IsStockItemTests(unittest.TestCase):
+    def test_inventory_type_is_kept(self):
+        self.assertTrue(report.is_stock_item({"item_type": "inventory"}))
+
+    def test_non_inventory_types_are_excluded(self):
+        for item_type in ["purchases", "sales", "sales_and_purchases", "service"]:
+            with self.subTest(item_type=item_type):
+                self.assertFalse(report.is_stock_item({"item_type": item_type}))
+
+    def test_case_insensitive(self):
+        self.assertTrue(report.is_stock_item({"item_type": "Inventory"}))
+
+    def test_missing_item_type_fails_open(self):
+        self.assertTrue(report.is_stock_item({}))
+        self.assertTrue(report.is_stock_item({"item_type": ""}))
+
+
+class BuildItemCatalogTests(unittest.TestCase):
+    def test_excludes_non_stock_items_from_catalog(self):
+        session = MagicMock()
+
+        items_page = MagicMock()
+        items_page.raise_for_status = MagicMock()
+        items_page.json.return_value = {
+            "items": [{"item_id": "item-1"}, {"item_id": "item-2"}],
+            "page_context": {"has_more_page": False},
+        }
+
+        stock_item_detail = MagicMock()
+        stock_item_detail.raise_for_status = MagicMock()
+        stock_item_detail.json.return_value = {
+            "item": {"item_id": "item-1", "sku": "SKU1", "name": "Widget", "item_type": "inventory"}
+        }
+        container_detail = MagicMock()
+        container_detail.raise_for_status = MagicMock()
+        container_detail.json.return_value = {
+            "item": {"item_id": "item-2", "sku": "N/A", "name": "20FT Container", "item_type": "purchases"}
+        }
+
+        def get_side_effect(url, params=None, headers=None, timeout=None):
+            if url.endswith("/inventory/v1/items"):
+                return items_page
+            if url.endswith("/inventory/v1/items/item-1"):
+                return stock_item_detail
+            if url.endswith("/inventory/v1/items/item-2"):
+                return container_detail
+            raise AssertionError(f"Unexpected GET {url}")
+
+        session.get.side_effect = get_side_effect
+
+        token_store = MagicMock()
+        token_store.get.return_value = "tok"
+        rate_limiter = MagicMock()
+
+        catalog = report.build_item_catalog(session, "https://api", "org1", token_store, rate_limiter)
+
+        self.assertEqual(list(catalog.keys()), ["item-1"])
+        self.assertEqual(catalog["item-1"]["Item Name"], "Widget")
 
 
 class WriteExcelTests(unittest.TestCase):
@@ -257,14 +329,45 @@ class MainIntegrationTest(unittest.TestCase):
         items_page = MagicMock()
         items_page.raise_for_status = MagicMock()
         items_page.json.return_value = {
-            "items": [{"item_id": "item-1"}],
+            "items": [{"item_id": "item-1"}, {"item_id": "item-2"}, {"item_id": "item-3"}],
             "page_context": {"has_more_page": False},
         }
         item_detail = MagicMock()
         item_detail.status_code = 200
         item_detail.raise_for_status = MagicMock()
         item_detail.json.return_value = {
-            "item": {"item_id": "item-1", "sku": "SKU1", "name": "Widget", "brand": "Acme"}
+            "item": {
+                "item_id": "item-1",
+                "sku": "SKU1",
+                "name": "Widget",
+                "brand": "Acme",
+                "item_type": "inventory",
+            }
+        }
+        # Non-stock catalog entry (e.g. a freight/container line item) -- should
+        # never appear in the output regardless of whether it has sales.
+        container_detail = MagicMock()
+        container_detail.status_code = 200
+        container_detail.raise_for_status = MagicMock()
+        container_detail.json.return_value = {
+            "item": {
+                "item_id": "item-2",
+                "sku": "N/A",
+                "name": "20FT Container",
+                "item_type": "purchases",
+            }
+        }
+        # Real stock item with zero sales in the window -- should be omitted.
+        no_sales_detail = MagicMock()
+        no_sales_detail.status_code = 200
+        no_sales_detail.raise_for_status = MagicMock()
+        no_sales_detail.json.return_value = {
+            "item": {
+                "item_id": "item-3",
+                "sku": "SKU3",
+                "name": "Unsold Widget",
+                "item_type": "inventory",
+            }
         }
 
         invoices_page = MagicMock()
@@ -289,6 +392,10 @@ class MainIntegrationTest(unittest.TestCase):
                 return items_page
             if url.endswith("/inventory/v1/items/item-1"):
                 return item_detail
+            if url.endswith("/inventory/v1/items/item-2"):
+                return container_detail
+            if url.endswith("/inventory/v1/items/item-3"):
+                return no_sales_detail
             if url.endswith("/inventory/v1/invoices"):
                 return invoices_page
             if url.endswith("/inventory/v1/invoices/inv-1"):
@@ -297,9 +404,15 @@ class MainIntegrationTest(unittest.TestCase):
 
         session.get.side_effect = get_side_effect
 
+        # This is the real production output path -- a live run may have
+        # already committed a real report there, so back it up rather than
+        # deleting it outright (a prior version of this test did exactly
+        # that and destroyed the real committed file when run locally).
         output_path = "reports/Sales_by_item(sep).xlsx"
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        backup_path = output_path + ".bak"
+        preexisting = os.path.exists(output_path)
+        if preexisting:
+            shutil.move(output_path, backup_path)
 
         try:
             report.main()
@@ -310,12 +423,17 @@ class MainIntegrationTest(unittest.TestCase):
             workbook = openpyxl.load_workbook(output_path)
             sheet = workbook.active
             self.assertEqual(sheet.cell(row=1, column=1).value, "SKU")
+            # Only item-1 survives: item-2 is a non-stock ("purchases") catalog
+            # entry and item-3 has zero sales in the window.
+            self.assertEqual(sheet.max_row, 2)
             self.assertEqual(sheet.cell(row=2, column=1).value, "SKU1")
             self.assertEqual(sheet.cell(row=2, column=2).value, "Widget")
             self.assertEqual(sheet.cell(row=2, column=3).value, "Acme")
             self.assertEqual(sheet.cell(row=2, column=sheet.max_column).value, 4)
         finally:
-            if os.path.exists(output_path):
+            if preexisting:
+                shutil.move(backup_path, output_path)
+            elif os.path.exists(output_path):
                 os.remove(output_path)
 
 
