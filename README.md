@@ -66,27 +66,46 @@ instead of letting the workers fire as fast as they can and hoping
 short backoffs are enough. If 429s still show up frequently in the logs
 after this change, lower `RATE_LIMIT_PER_MINUTE` further.
 
-## Item Runway Report
+## Item Runway Reports (Sales by Item)
 
-`scripts/item_runway_report.py`, run at 06:00 East Africa Time on the 1st
-of each month by `.github/workflows/item-runway-report.yml`. Replicates
-Zoho Inventory's Reports > Sales by Item, with date range "Previous week"
-compared against 14 previous periods.
+Two schedules of the same underlying report, both replicating Zoho
+Inventory's Reports > Sales by Item:
 
-Produces `reports/Sales_by_item(<mon>).xlsx` (e.g. `Sales_by_item(sep).xlsx`,
-named for the month the most recent of the 14 weeks falls in) with columns
-SKU, Item Name, Brand, then one column per week (`WK <n>`, oldest to
-newest, labeled with that week's ISO week-of-year number). One row per
-stock-tracked item that sold at least once in the window — non-stock
-catalog entries (freight/container line items etc., see below) and items
-with zero sales across all 14 weeks are both omitted. Same bold header /
-frozen header / sized columns / number formatting as the SOH report, and
-the workflow commits straight into `reports/` on `main` the same way.
+- **Monthly** — `scripts/item_runway_report.py`, run at 06:00 East Africa
+  Time on the 1st of each month by `.github/workflows/item-runway-report.yml`.
+  Date range "Previous week" compared against **14** previous periods.
+  Produces `reports/Sales_by_item(<mon>).xlsx` (e.g. `Sales_by_item(sep).xlsx`,
+  named for the month the most recent of the 14 weeks falls in).
+- **Weekly** — `scripts/item_runway_weekly_report.py`, run at 06:00 East
+  Africa Time every Sunday by `.github/workflows/item-runway-weekly-report.yml`.
+  Rolling **36**-period window anchored on the week ending that Sunday
+  itself (not the last full week *before* it, unlike the monthly report —
+  see "Window anchoring" below). Produces
+  `reports/Sales_by_item(WKx-WKy).xlsx`, e.g. `Sales_by_item(WK2-WK37).xlsx`,
+  where `x`/`y` are the ISO week numbers of the oldest/newest weeks in the
+  window.
 
-**Assumptions baked into this report** (documented in the script's
-docstring too) — verify the first run's numbers against the real Zoho UI
-report before trusting the automation, per the project's testing
-convention:
+Both share their entire data-fetching, filtering, and formatting logic via
+`scripts/sales_by_item_common.py` — only the window length, window
+anchoring, and output filename differ between the two thin entry-point
+scripts. This is deliberate: a fix to, say, the rate limiter now benefits
+both automations instead of needing to be applied twice and kept in sync
+by hand.
+
+Each output file has columns SKU, Item Name, Brand, then one column per
+week (`WK <n>`, oldest to newest, labeled with that week's ISO
+week-of-year number). One row per stock-tracked item that sold at least
+once in the window — non-stock catalog entries (freight/container line
+items etc., see below) and items with zero sales across the whole window
+are both omitted. Same bold header / frozen header / sized columns /
+number formatting as the SOH report, and both workflows commit straight
+into `reports/` on `main` the same way (each using its own filename glob,
+so a monthly run never touches a weekly-pattern file or vice versa).
+
+**Assumptions baked into these reports** (documented in
+`sales_by_item_common.py`'s docstring too) — verify a run's numbers
+against the real Zoho UI report before trusting the automation, per the
+project's testing convention:
 - "Sales by Item" quantity = **invoiced** quantity (draft/void invoices
   excluded), not booked sales-order quantity.
 - Covers **all warehouses/locations combined**, not a single store.
@@ -110,10 +129,10 @@ instead:
 1. The full active item catalog is fetched (list + per-item detail, same
    approach as the SOH report) to get SKU/Item Name/Brand for every item,
    filtering out non-stock items as described above.
-2. Every non-draft, non-void invoice dated in the 14-week window is listed
-   (cheap — paginated, sorted newest-first, and pagination stops as soon
-   as it walks past the window) and then fetched in full, one call per
-   invoice, to get its line items.
+2. Every non-draft, non-void invoice dated in the window is listed (cheap
+   — paginated, sorted newest-first, and pagination stops as soon as it
+   walks past the window) and then fetched in full, one call per invoice,
+   to get its line items.
 3. Each line item's quantity is summed into the week its invoice date
    falls in.
 4. Items with zero sales across the whole window are dropped from the
@@ -123,14 +142,36 @@ Both the catalog fetch and the invoice-detail fetch reuse the exact same
 rate limiter, heartbeat logging, and retry-with-backoff pattern that fixed
 the SOH report's production 429 crash (see above) — invoice volume over
 the window is not bounded the way the item catalog is, so this can end up
-making significantly more API calls than the SOH report does. The job has
-a generous 180-minute timeout to accommodate that.
+making significantly more API calls than the SOH report does. Both jobs
+have a generous 180-minute timeout to accommodate that.
 
-**First live run (2026-09-11, against a 35-period window before it was
-narrowed to 14):** completed successfully in ~1h42m against a catalog of
-1,842 active items — same order of magnitude as the SOH report's ~1,850
-items, so the catalog-fetch phase takes about as long (~30 min) as it does
-there; the rest of the time was the invoice-detail phase. With the window
-now 14 weeks instead of 35 (~40% of the date range), expect a materially
-shorter invoice-fetch phase on the next run, though the exact volume still
-depends on real invoice counts.
+**Window anchoring:** the monthly report anchors on "yesterday" so its
+window is the last *full* week strictly before the day it runs (matching
+Zoho's own "Previous week" semantics when viewed any day of the month).
+The weekly report anchors on "today" itself, so a run on Sunday includes
+the week ending that same Sunday as its most recent period — the
+assumption being that by the time the job actually runs, that day's sales
+data is final. Both are implemented via one shared function,
+`compute_week_buckets_ending_by(reference_date, num_periods)`, which
+returns the `num_periods` most recently completed Monday-Sunday weeks on
+or before `reference_date`; only the reference date passed to it differs
+(`today - 1 day` for monthly, `today` for weekly).
+
+**Backfilling/testing a specific date:** both scripts read an optional
+`REPORT_AS_OF_DATE` environment variable (`YYYY-MM-DD`) that overrides
+"today" — useful for seeing what a run would have produced on a past date
+without waiting for the schedule. Both workflows expose this as a
+`workflow_dispatch` input (`as_of_date`) for manual runs; leave it blank
+for a normal run using the real current date.
+
+**Live run history:**
+- **2026-09-11** (monthly script, still at 35 periods before it was
+  narrowed to 14): completed in ~1h42m against a catalog of 1,842 active
+  items — same order of magnitude as the SOH report's ~1,850 items, so the
+  catalog-fetch phase takes about as long (~30 min) as it does there; the
+  rest was the invoice-detail phase.
+- **2026-09-14** (monthly script, narrowed to 14 periods, with the
+  non-stock/zero-sales filters added): completed in ~1h04m, confirming
+  both the shorter window and the filters worked as intended (789 rows,
+  down from 1,842; no more all-zero rows; the "20FT Container" freight
+  item no longer appears).

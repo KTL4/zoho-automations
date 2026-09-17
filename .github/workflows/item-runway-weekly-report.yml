@@ -1,9 +1,9 @@
-name: Item Runway Report
+name: Item Runway Weekly Report
 
 on:
   schedule:
-    # 03:00 UTC on the 1st of each month = 06:00 East Africa Time
-    - cron: "0 3 1 * *"
+    # 03:00 UTC every Sunday = 06:00 East Africa Time
+    - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
       as_of_date:
@@ -27,22 +27,22 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Generate Item Runway report
+      - name: Generate Item Runway weekly report
         env:
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           ZOHO_ORGANIZATION_ID: ${{ secrets.ZOHO_ORGANIZATION_ID }}
           REPORT_AS_OF_DATE: ${{ inputs.as_of_date }}
-        run: python -u scripts/item_runway_report.py
+        run: python -u scripts/item_runway_weekly_report.py
 
       - name: Commit report to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add reports/Sales_by_item\(???\).xlsx
+          git add "reports/Sales_by_item(WK"*.xlsx
           if ! git diff --staged --quiet; then
-            git commit -m "Add Item Runway report for $(date -u +%F)"
+            git commit -m "Add Item Runway weekly report for $(date -u +%F)"
             git pull --rebase origin main
             git push origin HEAD:main
           else
