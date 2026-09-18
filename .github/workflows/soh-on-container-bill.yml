@@ -1,0 +1,44 @@
+name: SOH Refresh on Container Bill
+
+on:
+  repository_dispatch:
+    types: [container_bill_added]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Generate SOH report
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          ZOHO_ORGANIZATION_ID: ${{ secrets.ZOHO_ORGANIZATION_ID }}
+          WAREHOUSE_NAME: "Store 1"
+        run: python -u scripts/soh_daily_report.py
+
+      - name: Commit report to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/*.xlsx
+          if ! git diff --staged --quiet; then
+            git commit -m "Add SOH report triggered by container bill webhook"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          else
+            echo "No report changes to commit."
+          fi
