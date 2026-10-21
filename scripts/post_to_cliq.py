@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Posts a generated report file into a Zoho Cliq channel.
 
-Usage: post_to_cliq.py <file_path> [title]
+Usage: post_to_cliq.py <file_path>
 
 Required environment variables:
   ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET   - same Zoho Self Client used for Inventory
@@ -41,7 +41,7 @@ def get_access_token():
     return access_token
 
 
-def post_file(file_path, title=None):
+def post_file(file_path):
     org_id = os.environ.get("CLIQ_ORG_ID", DEFAULT_ORG_ID)
     channel_unique_name = os.environ.get("CLIQ_CHANNEL_UNIQUE_NAME", DEFAULT_CHANNEL_UNIQUE_NAME)
     access_token = get_access_token()
@@ -58,8 +58,7 @@ def post_file(file_path, title=None):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         }
-        data = {"title": title} if title else {}
-        response = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        response = requests.post(url, headers=headers, files=files, timeout=60)
 
     if response.status_code >= 300:
         raise RuntimeError(f"Cliq file upload failed ({response.status_code}): {response.text}")
@@ -69,12 +68,10 @@ def post_file(file_path, title=None):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: post_to_cliq.py <file_path> [title]", file=sys.stderr)
+        print("Usage: post_to_cliq.py <file_path>", file=sys.stderr)
         sys.exit(1)
 
-    file_path = sys.argv[1]
-    title = sys.argv[2] if len(sys.argv) > 2 else None
-    post_file(file_path, title=title)
+    post_file(sys.argv[1])
 
 
 if __name__ == "__main__":
