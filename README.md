@@ -24,8 +24,8 @@ authentication error, generate a fresh one from the same Self Client.
 `scripts/soh_daily_report.py`, run daily at 06:00 East Africa Time by
 `.github/workflows/soh-daily-report.yml`.
 
-Produces `reports/SOH_DD_MM_YYYY.xlsx` (dated for the previous day, since
-the job runs after Store 1 closes) with columns: BAR CODE, SKU, Item Name,
+Produces `reports/SOH_DD_MM_YYYY.xlsx` (dated for the day the report is
+fetched) with columns: BAR CODE, SKU, Item Name,
 SOH, Sales Price, Brand — one row per active item stocked at "Store 1",
 with a bold header row, frozen header, sized columns, and number
 formatting. The workflow commits the file straight into the `reports/`

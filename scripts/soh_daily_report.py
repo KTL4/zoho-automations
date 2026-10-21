@@ -37,7 +37,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -332,9 +332,7 @@ def main():
     warehouse_name = os.environ.get("WAREHOUSE_NAME", "Store 1")
     report_tz = ZoneInfo(os.environ.get("REPORT_TZ", "Africa/Nairobi"))
 
-    # This job runs early morning after Store 1 has closed, so the report
-    # date is "yesterday" in the business's local timezone.
-    report_date = datetime.now(report_tz) - timedelta(days=1)
+    report_date = datetime.now(report_tz)
     output_path = f"reports/SOH_{report_date.strftime('%d_%m_%Y')}.xlsx"
 
     rate_limit_per_minute = int(os.environ.get("RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE))
