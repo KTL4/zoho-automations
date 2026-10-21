@@ -364,6 +364,11 @@ def main():
     write_excel(rows, output_path)
     print(f"Wrote {len(rows)} rows to {output_path}")
 
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a") as f:
+            f.write(f"report_path={output_path}\n")
+
 
 if __name__ == "__main__":
     main()

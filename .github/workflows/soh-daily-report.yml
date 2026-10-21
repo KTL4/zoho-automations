@@ -23,6 +23,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Generate SOH report
+        id: generate
         env:
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
@@ -43,3 +44,11 @@ jobs:
           else
             echo "No report changes to commit."
           fi
+
+      - name: Post report to Zoho Cliq
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_CLIQ_REFRESH_TOKEN: ${{ secrets.ZOHO_CLIQ_REFRESH_TOKEN }}
+        run: |
+          python -u scripts/post_to_cliq.py "${{ steps.generate.outputs.report_path }}" "Daily SOH Report - Store 1"

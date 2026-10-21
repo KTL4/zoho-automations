@@ -19,6 +19,13 @@ with the `ZohoInventory.FullAccess.all` scope. The refresh token does not
 expire unless revoked, but if any script starts failing with an
 authentication error, generate a fresh one from the same Self Client.
 
+For posting reports into Zoho Cliq, one additional secret is needed:
+
+- `ZOHO_CLIQ_REFRESH_TOKEN` — a refresh token generated from the *same* Self
+  Client above, but with the `ZohoCliq.Webhooks.CREATE` scope instead (Self
+  Clients can generate multiple refresh tokens, each tied to the scope it
+  was requested with).
+
 ## SOH Daily Report
 
 `scripts/soh_daily_report.py`, run daily at 06:00 East Africa Time by
@@ -33,6 +40,15 @@ folder on `main` (requires `permissions: contents: write`, already set in
 the workflow) — no manual download from the Actions UI needed; anyone with
 repo access has it via a normal `git pull`, and it stays in version
 history for good.
+
+After committing, the workflow also posts the file into the Zoho Cliq
+channel `#Sales & Marketing UG` (unique name `salesmarketingug`, org ID
+`941419808`) via `scripts/post_to_cliq.py`, using the Cliq REST API's
+"Share files in a Channel" endpoint
+(`POST https://cliq.zoho.com/company/{org}/api/v2/channelsbyname/{channel}/files`,
+scope `ZohoCliq.Webhooks.CREATE`). If the Cliq channel or org ever changes,
+override `CLIQ_CHANNEL_UNIQUE_NAME` / `CLIQ_ORG_ID` env vars in the
+workflow rather than editing the script's defaults.
 
 **Note:** Zoho Inventory's API has no direct endpoint for the "Stock
 Summary" report shown in the web UI, so this is built from the Items API's
