@@ -33,19 +33,32 @@ jobs:
         run: python -u scripts/soh_daily_report.py
 
       - name: Commit report to repo
+        id: commit
+        env:
+          REPORT_PATH: ${{ steps.generate.outputs.report_path }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add reports/*.xlsx
           if ! git diff --staged --quiet; then
+            # Only a brand-new report file (not a same-day refresh of one
+            # already committed earlier) should trigger a fresh Cliq post.
+            status=$(git diff --staged --name-status -- "$REPORT_PATH" | cut -f1)
             git commit -m "Add SOH report for $(date -u +%F)"
             git pull --rebase origin main
             git push origin HEAD:main
+            if [ "$status" = "A" ]; then
+              echo "new_report=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "new_report=false" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "No report changes to commit."
+            echo "new_report=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Post report to Zoho Cliq
+        if: steps.commit.outputs.new_report == 'true'
         env:
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
