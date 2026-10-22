@@ -292,6 +292,7 @@ def build_rows(items, warehouse_name):
                 }
             )
             break
+    rows.sort(key=lambda row: (row["SKU"] or "").strip().lower())
     return rows
 
 
