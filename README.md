@@ -58,18 +58,32 @@ Invoices" stock-tracking mode — spot-check the first run's numbers against
 the Zoho Inventory UI.
 
 Because the per-warehouse stock breakdown is only on each item's *detail*
-endpoint (not the list endpoint), the script makes one API call per active
-item — expect the run time to scale with catalog size (the live Store 1
-catalog has ~1,850 active items). It fetches details concurrently, paced
-by a shared rate limiter (`RATE_LIMIT_PER_MINUTE`, default 60/min), logs
-progress every 100 items, and logs a heartbeat every 20 seconds so a
+endpoint (not the list endpoint), the script fetches detail for every
+active item — but in batches of up to 100 via Zoho's bulk `/itemdetails`
+endpoint rather than one call per item (switched 2026-10-27; a live run
+against ~1,795 active items now takes **18 API calls and ~24 seconds**,
+down from ~1,800 calls and ~30 minutes). Batches fetch concurrently, paced
+by a shared rate limiter (`RATE_LIMIT_PER_MINUTE`, default 60/min), log
+progress after every batch, and log a heartbeat every 20 seconds so a
 stalled run is visible in real time in the workflow's logs rather than
 going silent. Network errors and rate-limit (429) responses are retried
-with backoff (honoring the `Retry-After` header when Zoho sends one); an
-item that still fails after retries is logged and skipped rather than
-crashing the whole report. The job has a 45-minute timeout as a safety cap
-(1,850 items at 60/min is ~31 minutes before any retries, so there's
-headroom).
+with backoff (honoring the `Retry-After` header when Zoho sends one); if
+a whole batch still fails after retries, its items are re-fetched one at a
+time via the single-item endpoint instead (so one bad id doesn't cost the
+other 99), and an item that still fails after that is logged and skipped
+rather than crashing the whole report. The job keeps its 45-minute
+timeout as a safety cap even though a normal run now finishes in well
+under a minute.
+
+An alternative optimization — only re-fetching items whose
+`last_modified_time` changed since the last run — was considered and
+rejected: there's no confirmation that a stock movement (a sale, a
+purchase receipt, a manual adjustment) actually updates an item's
+`last_modified_time` in Zoho's data model, so that approach risked
+silently serving stale stock figures for exactly the data this report
+exists to report correctly. The bulk-batch approach gets the same API
+call reduction without that correctness risk, since every item is still
+fetched fresh every run.
 
 **Root cause found on 2026-09-03:** the scheduled run crashed with
 `requests.exceptions.HTTPError: 429` after being throttled by Zoho for

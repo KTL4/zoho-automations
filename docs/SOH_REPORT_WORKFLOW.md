@@ -45,10 +45,15 @@ Either trigger runs the exact same job.
 ## 2. Generate (`scripts/soh_daily_report.py`)
 
 1. Exchanges the stored Zoho refresh token for a short-lived access token.
-2. Fetches every **active** item from Zoho Inventory (paginated list, then
-   one detail call per item — the list endpoint doesn't expose
-   per-warehouse stock), concurrently, rate-limited, with retry/backoff on
-   429s and network errors.
+2. Fetches every **active** item from Zoho Inventory: a paginated list
+   call, then full detail in **batches of up to 100 items per call** via
+   Zoho's bulk `/itemdetails` endpoint (the list endpoint doesn't expose
+   per-warehouse stock, but fetching one-item-at-a-time cost ~1,800 API
+   calls and ~30 minutes; batching cut that to ~18 calls and ~24 seconds).
+   Batches fetch concurrently, rate-limited, with retry/backoff on 429s
+   and network errors; any batch that fails outright falls back to
+   fetching its items one at a time so a single bad id doesn't cost the
+   other 99.
 3. Filters to items stocked at warehouse **"Store 1"**.
 4. Builds one row per item: `BAR CODE, SKU, Item Name, SOH, Sales Price,
    Brand`.
