@@ -64,12 +64,10 @@ def main():
     print("Top-level keys:", list(payload.keys()))
     items = payload.get("items") or payload.get("itemdetails") or []
     print(f"Items returned: {len(items)}")
-    if items:
-        first = items[0]
-        print("First item top-level keys:", list(first.keys()))
-        print("Has 'warehouses' key:", "warehouses" in first)
-        print("First item (truncated JSON):")
-        print(json.dumps(first, indent=2)[:2000])
+    for item in items:
+        print(f"--- item_id={item.get('item_id')} sku={item.get('sku')} ---")
+        print("warehouses array:")
+        print(json.dumps(item.get("warehouses"), indent=2))
 
 
 if __name__ == "__main__":
