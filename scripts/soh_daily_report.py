@@ -6,18 +6,21 @@ writes it to an Excel file named SOH_DD_MM_YYYY.xlsx.
 
 Zoho Inventory's API has no direct "Stock Summary" report endpoint, so this
 approximates it using the Items API: the items *list* endpoint doesn't
-include per-warehouse stock, so for every active item we fetch its full
-detail record (which does include a `warehouses` array) and keep the entry
-matching WAREHOUSE_NAME. Detail lookups run concurrently, paced by a shared
-rate limiter to stay under Zoho's request quota (a live run against ~1850
-items crashed with a 429 after being throttled for the better part of 30
-minutes, which is what the rate limiter and Retry-After handling below are
-for), print progress every 100 items plus a heartbeat every 20 seconds (so
-a stalled run is visible in real time rather than going silent), retry
-network errors and 429s with backoff, and skip (rather than crash on) any
-item that still fails after retries. The access token is refreshed
-automatically if a run takes long enough to approach the 1-hour token
-expiry.
+include per-warehouse stock, so active items' full detail (which does
+include a `warehouses` array) is fetched in batches of up to 100 via the
+bulk /itemdetails endpoint, keeping the entry matching WAREHOUSE_NAME.
+Batch fetches run concurrently, paced by a shared rate limiter to stay
+under Zoho's request quota (a live run against ~1850 items crashed with a
+429 after being throttled for the better part of 30 minutes back when this
+fetched one item per call, which is what the rate limiter and Retry-After
+handling below are for). If a whole batch fails after retries, its items
+are re-fetched one at a time via the single-item endpoint instead, so one
+bad id doesn't cost the rest of the batch. Progress prints after every
+batch plus a heartbeat every 20 seconds (so a stalled run is visible in
+real time rather than going silent), and any item that still fails after
+retries is skipped rather than crashing the whole report. The access
+token is refreshed automatically if a run takes long enough to approach
+the 1-hour token expiry.
 
 Required environment variables:
     ZOHO_CLIENT_ID
@@ -50,11 +53,11 @@ OUTPUT_COLUMNS = ["BAR CODE", "SKU", "Item Name", "SOH", "Sales Price", "Brand"]
 BARCODE_FIELDS = ("upc", "ean", "isbn", "part_number")
 TOKEN_REFRESH_INTERVAL_SECONDS = 45 * 60  # access tokens expire after 1 hour
 DETAIL_FETCH_WORKERS = 6
-PROGRESS_EVERY = 100
 HEARTBEAT_SECONDS = 20
 RETRY_ATTEMPTS = 6
 DEFAULT_RATE_LIMIT_PER_MINUTE = 60
 MAX_RETRY_AFTER_SECONDS = 90
+ITEMDETAILS_BATCH_SIZE = 100  # Zoho's documented max ids per /itemdetails call
 
 
 def get_access_token():
@@ -168,6 +171,54 @@ def parse_retry_after(response, attempt):
     return min(2**attempt, MAX_RETRY_AFTER_SECONDS)
 
 
+def chunked(sequence, size):
+    for i in range(0, len(sequence), size):
+        yield sequence[i : i + size]
+
+
+def fetch_item_details_bulk(session, api_domain, organization_id, token_store, rate_limiter, item_ids):
+    """Fetches full detail (including per-warehouse stock) for up to
+    ITEMDETAILS_BATCH_SIZE items in a single call via /itemdetails.
+    Returns None (after exhausting retries) rather than raising, so the
+    caller can fall back to fetching this batch's items individually.
+    """
+    last_error = None
+    for attempt in range(RETRY_ATTEMPTS):
+        rate_limiter.wait()
+        try:
+            response = session.get(
+                f"{api_domain}/inventory/v1/itemdetails",
+                params={"organization_id": organization_id, "item_ids": ",".join(item_ids)},
+                headers={"Authorization": f"Zoho-oauthtoken {token_store.get()}"},
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            print(f"  [batch of {len(item_ids)}] attempt {attempt + 1} network error: {exc}", file=sys.stderr, flush=True)
+            time.sleep(min(2**attempt, MAX_RETRY_AFTER_SECONDS))
+            continue
+
+        if response.status_code == 429:
+            wait_s = parse_retry_after(response, attempt)
+            last_error = requests.exceptions.HTTPError(f"429 Too Many Requests for batch of {len(item_ids)}")
+            print(f"  [batch of {len(item_ids)}] attempt {attempt + 1} rate-limited (429), waiting {wait_s:.1f}s", file=sys.stderr, flush=True)
+            time.sleep(wait_s)
+            continue
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            last_error = exc
+            print(f"  [batch of {len(item_ids)}] attempt {attempt + 1} HTTP error: {exc}", file=sys.stderr, flush=True)
+            time.sleep(min(2**attempt, MAX_RETRY_AFTER_SECONDS))
+            continue
+
+        return response.json().get("items", [])
+
+    print(f"  [batch of {len(item_ids)}] giving up after {RETRY_ATTEMPTS} attempts: {last_error}", file=sys.stderr, flush=True)
+    return None
+
+
 def fetch_item_detail(session, api_domain, organization_id, token_store, rate_limiter, item_id):
     last_error = None
     for attempt in range(RETRY_ATTEMPTS):
@@ -208,7 +259,12 @@ def fetch_item_detail(session, api_domain, organization_id, token_store, rate_li
 
 def fetch_active_items(session, api_domain, organization_id, token_store, rate_limiter):
     item_ids = fetch_active_item_ids(session, api_domain, organization_id)
-    print(f"Found {len(item_ids)} active item(s); fetching per-warehouse stock detail...", flush=True)
+    batches = list(chunked(item_ids, ITEMDETAILS_BATCH_SIZE))
+    print(
+        f"Found {len(item_ids)} active item(s); fetching per-warehouse stock "
+        f"detail in {len(batches)} batch(es) of up to {ITEMDETAILS_BATCH_SIZE}...",
+        flush=True,
+    )
 
     items = []
     completed = 0
@@ -229,19 +285,38 @@ def fetch_active_items(session, api_domain, organization_id, token_store, rate_l
         with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as executor:
             futures = {
                 executor.submit(
-                    fetch_item_detail, session, api_domain, organization_id, token_store, rate_limiter, item_id
-                ): item_id
-                for item_id in item_ids
+                    fetch_item_details_bulk, session, api_domain, organization_id, token_store, rate_limiter, batch
+                ): batch
+                for batch in batches
             }
             for future in as_completed(futures):
-                detail = future.result()
-                completed += 1
-                if detail is None:
-                    failed += 1
+                batch = futures[future]
+                batch_items = future.result()
+                if batch_items is None:
+                    # The whole batch failed after retries -- fall back to
+                    # per-item fetches so one bad id doesn't cost the rest.
+                    print(f"  [batch of {len(batch)}] falling back to per-item fetch", file=sys.stderr, flush=True)
+                    for item_id in batch:
+                        detail = fetch_item_detail(
+                            session, api_domain, organization_id, token_store, rate_limiter, item_id
+                        )
+                        completed += 1
+                        if detail is None:
+                            failed += 1
+                        else:
+                            items.append(detail)
                 else:
-                    items.append(detail)
-                if completed % PROGRESS_EVERY == 0 or completed == len(item_ids):
-                    print(f"  ...{completed}/{len(item_ids)} items fetched ({failed} failed)", flush=True)
+                    completed += len(batch)
+                    missing = len(batch) - len(batch_items)
+                    if missing:
+                        failed += missing
+                        print(
+                            f"  [batch of {len(batch)}] returned {len(batch_items)} of {len(batch)} items",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    items.extend(batch_items)
+                print(f"  ...{completed}/{len(item_ids)} items fetched ({failed} failed)", flush=True)
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join()
