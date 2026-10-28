@@ -44,8 +44,11 @@ def main():
         timeout=30,
     )
     list_response.raise_for_status()
-    item_ids = [item["item_id"] for item in list_response.json()["items"]]
+    list_items = list_response.json()["items"]
+    item_ids = [item["item_id"] for item in list_items]
     print("Testing with item_ids:", item_ids)
+    print("\nLIST endpoint raw item (first):")
+    print(json.dumps(list_items[0], indent=2))
 
     for item_id in item_ids:
         print(f"\n=== item_id={item_id} ===")
