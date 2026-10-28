@@ -27,8 +27,8 @@ jobs:
           python -u scripts/soh_daily_report.py
           python3 -c "
           from openpyxl import load_workbook
-          import glob
-          path = sorted(glob.glob('reports/SOH_*.xlsx'))[-1]
+          import glob, os
+          path = max(glob.glob('reports/SOH_*.xlsx'), key=os.path.getmtime)
           wb = load_workbook(path)
           ws = wb.active
           total = ws.max_row - 1
