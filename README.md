@@ -75,6 +75,14 @@ rather than crashing the whole report. The job keeps its 45-minute
 timeout as a safety cap even though a normal run now finishes in well
 under a minute.
 
+**Root cause found on 2026-10-28:** the bulk `/itemdetails` endpoint doesn't
+return a top-level `brand` field the way the single-item endpoint (and the
+items list endpoint) do, so Brand came back blank for every row for one
+day after the batching switch above. Since the items list call (already
+made to collect active item ids) returns `brand` for free, `scripts/soh_daily_report.py`
+now also builds an id-to-brand map from that call and patches it back
+onto each item after the detail fetch — no extra API calls needed.
+
 An alternative optimization — only re-fetching items whose
 `last_modified_time` changed since the last run — was considered and
 rejected: there's no confirmation that a stock movement (a sale, a
