@@ -16,10 +16,25 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Compare single-item vs bulk custom_fields
+      - name: Run full SOH report with the brand fix, verify Brand column
         env:
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           ZOHO_ORGANIZATION_ID: ${{ secrets.ZOHO_ORGANIZATION_ID }}
-        run: python -u scripts/_test_brand_regression.py
+          WAREHOUSE_NAME: "Store 1"
+        run: |
+          python -u scripts/soh_daily_report.py
+          python3 -c "
+          from openpyxl import load_workbook
+          import glob
+          path = sorted(glob.glob('reports/SOH_*.xlsx'))[-1]
+          wb = load_workbook(path)
+          ws = wb.active
+          total = ws.max_row - 1
+          brands = [row[5].value for row in ws.iter_rows(min_row=2)]
+          non_empty = sum(1 for b in brands if b)
+          print(f'{path}: {non_empty}/{total} rows have a non-empty Brand')
+          print('sample brands:', [b for b in brands if b][:5])
+          "
+          git status --porcelain reports/

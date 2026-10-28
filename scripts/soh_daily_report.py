@@ -137,7 +137,14 @@ def resolve_organization_id(session, api_domain):
 
 
 def fetch_active_item_ids(session, api_domain, organization_id):
+    """Returns (item_ids, brand_by_id). The items *list* endpoint already
+    includes each item's `brand` for free, which matters because the bulk
+    /itemdetails endpoint used afterwards for per-warehouse stock does not
+    return `brand` at all (confirmed 2026-10-28) -- without this, Brand
+    would be silently blank for every row.
+    """
     item_ids = []
+    brand_by_id = {}
     page = 1
     while True:
         response = session.get(
@@ -152,13 +159,16 @@ def fetch_active_item_ids(session, api_domain, organization_id):
         )
         response.raise_for_status()
         payload = response.json()
-        item_ids.extend(item["item_id"] for item in payload.get("items", []))
+        for item in payload.get("items", []):
+            item_ids.append(item["item_id"])
+            if item.get("brand"):
+                brand_by_id[item["item_id"]] = item["brand"]
 
         if not payload.get("page_context", {}).get("has_more_page"):
             break
         page += 1
 
-    return item_ids
+    return item_ids, brand_by_id
 
 
 def parse_retry_after(response, attempt):
@@ -258,7 +268,7 @@ def fetch_item_detail(session, api_domain, organization_id, token_store, rate_li
 
 
 def fetch_active_items(session, api_domain, organization_id, token_store, rate_limiter):
-    item_ids = fetch_active_item_ids(session, api_domain, organization_id)
+    item_ids, brand_by_id = fetch_active_item_ids(session, api_domain, organization_id)
     batches = list(chunked(item_ids, ITEMDETAILS_BATCH_SIZE))
     print(
         f"Found {len(item_ids)} active item(s); fetching per-warehouse stock "
@@ -323,6 +333,15 @@ def fetch_active_items(session, api_domain, organization_id, token_store, rate_l
 
     if failed:
         print(f"Warning: {failed} item(s) could not be fetched after retries and were skipped.", file=sys.stderr, flush=True)
+
+    # The bulk /itemdetails endpoint doesn't return `brand`, unlike the
+    # single-item endpoint and the items list -- patch it back in from the
+    # list call above (see fetch_active_item_ids docstring).
+    for item in items:
+        if not item.get("brand"):
+            brand = brand_by_id.get(item.get("item_id"))
+            if brand:
+                item["brand"] = brand
 
     return items
 
