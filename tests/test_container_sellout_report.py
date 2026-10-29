@@ -2,7 +2,6 @@ import datetime
 import os
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -85,6 +84,33 @@ def fake_response(payload, status=200):
     response.headers = {}
     response.raise_for_status = MagicMock()
     return response
+
+
+class TokenHandlingTests(unittest.TestCase):
+    def test_401_refreshes_token_once_and_retries(self):
+        session = MagicMock()
+        session.get.side_effect = [fake_response({}, status=401), fake_response({"ok": 1})]
+        token_store = MagicMock()
+        token_store.get.side_effect = ["old", "new"]
+        response = report.authorized_get(session, token_store, "https://api/x/invoices", {}, timeout=5)
+        self.assertEqual(response.status_code, 200)
+        token_store.force_refresh.assert_called_once()
+        self.assertEqual(session.get.call_args.kwargs["headers"]["Authorization"], "Zoho-oauthtoken new")
+
+    def test_in_progress_report_waits_without_minting_tokens(self):
+        # The first live run minted a token on every "still computing" retry,
+        # which got the working token revoked.
+        busy = {"fifo_cost_lot_tracking": [], "page_context": {"is_inv_txn_job_in_progress": True, "has_more_page": True}}
+        ready = {"fifo_cost_lot_tracking": [{"quantity_in": 1}], "page_context": {"has_more_page": True}}
+        session = MagicMock()
+        session.get.side_effect = [fake_response(busy), fake_response(ready)]
+        token_store = MagicMock()
+        token_store.get.return_value = "tok"
+        with patch.object(report.time, "sleep"):
+            rows, more = report.fetch_lot_page(session, "https://api", "1", token_store, D(2020, 1, 1), D(2026, 1, 1), 242)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(more)
+        token_store.force_refresh.assert_not_called()
 
 
 class EndToEndTests(unittest.TestCase):

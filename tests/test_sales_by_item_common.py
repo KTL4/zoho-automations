@@ -296,6 +296,24 @@ class WriteExcelTests(unittest.TestCase):
                 os.remove(output_path)
 
 
+class FetchDetailUnauthorizedTests(unittest.TestCase):
+    def test_401_forces_a_token_refresh_then_succeeds(self):
+        unauthorized = MagicMock(status_code=401)
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"invoice": {"invoice_id": "1"}}
+        session = MagicMock()
+        session.get.side_effect = [unauthorized, ok]
+        token_store = MagicMock()
+        token_store.get.return_value = "tok"
+        limiter = MagicMock()
+
+        result = common.fetch_detail(session, "https://api", "org", token_store, limiter,
+                                     url="https://api/invoices/1", result_key="invoice", label="invoice 1")
+
+        self.assertEqual(result, {"invoice_id": "1"})
+        token_store.force_refresh.assert_called_once()
+
+
 class ResolveTodayTests(unittest.TestCase):
     def test_uses_override_when_set(self):
         from unittest.mock import patch

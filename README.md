@@ -242,7 +242,9 @@ FIFO (oldest stock sells first), the same way Zoho values stock:
    alone gives the headline Sellout %, but it counts every outflow
    (transfers and write-offs as well as sales).
 2. **Sales.** Every non-draft, non-void invoice since the first lot, at line
-   level, minus credit notes. This costs one API call per invoice, so the
+   level. Credit notes are not subtracted: Zoho's FIFO already books each
+   return as a new inward lot, so netting them off too would count every
+   return twice. This costs one API call per invoice, so the
    lines are cached in `data/sales_lines_<org>.csv` and committed. Each run
    only fetches invoices that are new or edited since the last one
    (`last_modified_time`), and drops voided ones.
@@ -252,6 +254,17 @@ FIFO (oldest stock sells first), the same way Zoho values stock:
 
 The raw lot pull is saved alongside, as `data/fifo_lots_<org>.csv`, so the
 data behind any report can be checked.
+
+**Live run history:**
+- **2026-10-29** (first run, KTL org 780891784): the lot pull worked and
+  found containers C1 (Dec 2019) onward as "UBL Inventory Receipt" bills,
+  plus Aiwibi/YIFAR bills, but it hit the then 500-page cap at mid-2024
+  (most report rows are outward movements, ~28 inward lots per page) and
+  then crashed with a 401: every "report still computing" retry had
+  minted a new access token, and Zoho revoked the working one. Fixed by
+  raising the cap, minting a token only for a stale first page, and
+  refreshing on any 401. It also showed that 8,215 of the lots are credit
+  notes, which is why returns are no longer netted off sales.
 
 **First run (backfill):** fetching every historical invoice can take
 longer than one GitHub Actions job allows. The script stops fetching after
