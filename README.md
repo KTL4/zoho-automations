@@ -213,3 +213,55 @@ for a normal run using the real current date.
   both the shorter window and the filters worked as intended (789 rows,
   down from 1,842; no more all-zero rows; the "20FT Container" freight
   item no longer appears).
+
+## Container Sellout Report
+
+`scripts/container_sellout_report.py`, run at 06:15 East Africa Time every
+Monday by `.github/workflows/container-sellout-report.yml` (also runnable
+on demand from the Actions tab). Full walkthrough:
+`docs/CONTAINER_SELLOUT_WORKFLOW.md`.
+
+Produces `reports/Container_Sellout_DD_MM_YYYY.xlsx` with three tabs:
+
+- **Containers** — one row per container that has ever arrived (one bill
+  from a container supplier): arrival date, units in, units sold, other
+  outflows, units on hand, **Sellout % (Zoho FIFO)**, **Sold % (Invoices)**,
+  sold % by day 30/60/90/180, days to 50% and 80% sold, last sale, cost in
+  and cost still on hand.
+- **Container x SKU** — the same figures per SKU within each container.
+- **Read Me** — the definitions, and whether the sales history is complete.
+
+Zoho doesn't record which container a sale came from, so the report uses
+FIFO (oldest stock sells first), the same way Zoho values stock:
+
+1. **Lots.** Zoho's own FIFO Cost Lot Tracking report
+   (`reports/fifocostlottracking`) gives every inward lot per SKU, with
+   quantity in and quantity still on hand. Container lots are bills /
+   purchase receives from the suppliers in `CONTAINER_SUPPLIER_PATTERNS`
+   (UBL, Aiwibi, EFRIS STOCK by default), grouped by bill number. This
+   alone gives the headline Sellout %, but it counts every outflow
+   (transfers and write-offs as well as sales).
+2. **Sales.** Every non-draft, non-void invoice since the first lot, at line
+   level, minus credit notes. This costs one API call per invoice, so the
+   lines are cached in `data/sales_lines_<org>.csv` and committed. Each run
+   only fetches invoices that are new or edited since the last one
+   (`last_modified_time`), and drops voided ones.
+3. **Timing.** Each SKU's daily sales are matched to its lots oldest-first,
+   never more than Zoho says left that lot and never before it arrived.
+   What Zoho consumed that invoices don't explain is "Other Outflows".
+
+The raw lot pull is saved alongside, as `data/fifo_lots_<org>.csv`, so the
+data behind any report can be checked.
+
+**First run (backfill):** fetching every historical invoice can take
+longer than one GitHub Actions job allows. The script stops fetching after
+`SALES_FETCH_TIME_BUDGET_MINUTES` (300), saves what it has, still writes
+the report with a PARTIAL note on the Read Me tab, and the next run carries
+on. Trigger it manually a few times in a row until the PARTIAL note goes.
+Sellout % (Zoho FIFO) is complete from the very first run.
+
+**Verify before trusting it:** the field names of the FIFO lot report are
+taken from the inventory-workflows toolkit's `pull_fifo_lots.ps1`, not yet
+from a run in this repo. On the first run, check the log's lot-type
+summary, and tie one container's Units In to its bill and its Units On
+Hand to the stock in Zoho.
