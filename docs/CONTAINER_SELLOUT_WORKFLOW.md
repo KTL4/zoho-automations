@@ -7,8 +7,8 @@ How much of every container that has ever arrived has sold, and how fast.
 ```
  Trigger              Phase 1: Lots          Phase 2: Sales         Phase 3: Match       Output
 ┌────────────┐      ┌────────────────┐     ┌──────────────────┐   ┌───────────────┐   ┌──────────────────────┐
-│ Monday     │ ───▶ │ Zoho FIFO Cost │ ──▶ │ Invoices + credit│──▶│ FIFO: each    │──▶│ reports/Container_   │
-│ 03:15 UTC  │      │ Lot Tracking   │     │ notes, line level│   │ SKU's sales → │   │ Sellout_DD_MM_YYYY   │
+│ Monday     │ ───▶ │ Zoho FIFO Cost │ ──▶ │ Invoices, line   │──▶│ FIFO: each    │──▶│ reports/Container_   │
+│ 03:15 UTC  │      │ Lot Tracking   │     │ level            │   │ SKU's sales → │   │ Sellout_DD_MM_YYYY   │
 │ or manual  │      │ (every lot ever│     │ (cached in data/,│   │ oldest lot    │   │ .xlsx                │
 │ run        │      │  received)     │     │  only new/edited │   │ first         │   │ + data/*.csv         │
 └────────────┘      └────────────────┘     │  fetched)        │   └───────────────┘   └──────────────────────┘
@@ -34,8 +34,8 @@ Runs never overlap (`concurrency` group), because each run rewrites the sales ca
    (default: Uncle Bill / UBL, Aiwibi / Aiwina / Yifar, EFRIS STOCK).
    Container = bill number. The log prints the 15 most common lot types
    and suppliers, so you can see what was or wasn't counted.
-2. **Sales.** Lists every non-draft, non-void invoice and credit note
-   since the first lot, then fetches line detail only for documents that
+2. **Sales.** Lists every non-draft, non-void invoice since the first
+   lot, then fetches line detail only for documents that
    are new or whose `last_modified_time` changed. The lines live in
    `data/sales_lines_<org>.csv`.
 3. **Match.** For each SKU, net daily sales go to the oldest lot that had
@@ -57,7 +57,7 @@ Download the latest file from `reports/` and save it to
 | Column | Meaning |
 |---|---|
 | Sellout % (Zoho FIFO) | (Units In − Units On Hand) ÷ Units In. Straight from Zoho. Includes transfers and write-offs |
-| Sold % (Invoices) | Units invoiced (net of credit notes) that FIFO places in this container ÷ Units In |
+| Sold % (Invoices) | Units invoiced that FIFO places in this container ÷ Units In. Returns aren't subtracted: Zoho books a credit note as a new inward lot |
 | Other Outflows | What left the container that invoices don't explain: transfers, adjustments, damages |
 | Sold % by Day N | Share invoiced within N days of arrival. Blank if the container is younger than N days |
 | Days to 50% / 80% Sold | Days from arrival until that share was invoiced. Blank if not reached yet |
@@ -74,6 +74,16 @@ Download the latest file from `reports/` and save it to
 | `RATE_LIMIT_PER_MINUTE` | 60 | Zoho API calls per minute |
 
 ## Known quirks / design decisions
+
+- **The lot pull alone takes about an hour for KTL.** Most rows in the
+  FIFO report are outward movements, so each 200-row page holds only ~28
+  inward lots; the first live run needed 500 pages to reach mid-2024.
+- **Never mint a new token per retry.** Zoho revokes the oldest live access
+  token once too many exist for one refresh token; the first live run
+  (2026-10-29) crashed with a 401 that way. Tokens are refreshed only on a
+  401 or a stale first page of the lot report.
+- **Credit notes are inward lots**, not negative sales (8,215 of KTL's
+  lots are credit notes), so they are not subtracted from sales.
 
 - **First run is a backfill.** It needs one API call per historical
   invoice. At 60 calls a minute, 300 minutes is about 18,000 invoices per

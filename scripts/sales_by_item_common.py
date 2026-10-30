@@ -129,6 +129,14 @@ class TokenStore:
                 self._issued_at = time.monotonic()
             return self._token
 
+    def force_refresh(self):
+        """Replaces the token now, e.g. after a 401 (Zoho revokes the oldest
+        live access token once too many exist for one refresh token)."""
+        with self._lock:
+            self._token, _ = get_access_token()
+            self._issued_at = time.monotonic()
+            return self._token
+
 
 class RateLimiter:
     """Paces requests across all worker threads to a fixed rate per minute.
@@ -208,6 +216,12 @@ def fetch_detail(session, api_domain, organization_id, token_store, rate_limiter
             last_error = exc
             print(f"  [{label}] attempt {attempt + 1} network error: {exc}", file=sys.stderr, flush=True)
             time.sleep(min(2**attempt, MAX_RETRY_AFTER_SECONDS))
+            continue
+
+        if response.status_code == 401:
+            last_error = requests.exceptions.HTTPError(f"401 Unauthorized for {label}")
+            print(f"  [{label}] attempt {attempt + 1} unauthorized (401), refreshing access token", file=sys.stderr, flush=True)
+            token_store.force_refresh()
             continue
 
         if response.status_code == 429:

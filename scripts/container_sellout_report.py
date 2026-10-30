@@ -21,9 +21,11 @@ that, in three phases:
      Note that "units in - on hand" counts *every* way stock left, sales
      but also transfers out (e.g. KTL -> KSL) and write-offs.
 
-  2. Sales -- every non-draft, non-void invoice (and, where the API exposes
-     them, credit notes, netted off as returns) since the first lot, at
-     line level (date, SKU, qty). This is the expensive phase -- one API
+  2. Sales -- every non-draft, non-void invoice since the first lot, at
+     line level (date, SKU, qty). Credit notes are deliberately NOT netted
+     off: Zoho's FIFO already books every credit note as a new inward lot
+     (returned stock that sells again from there), so subtracting them from
+     sales as well would count each return twice. This is the expensive phase -- one API
      call per document -- so the lines are cached in data/ and committed:
      each run lists the documents (cheap, 200 per call) and only fetches
      detail for ones that are new or whose last_modified_time changed.
@@ -91,18 +93,18 @@ CONTAINER_TRANSACTION_TYPES = ("bill", "purchase receive", "purchasereceive", "r
 SOLD_BY_DAYS = (30, 60, 90, 180)
 SOLD_SHARE_MILESTONES = (0.5, 0.8)
 LOT_PAGE_SIZE = 200
-LOT_MAX_PAGES = 500
+LOT_MAX_PAGES = 5000  # KTL needed 500+ pages just to reach mid-2024 (live run 2026-10-29)
+LOT_PAGE_PAUSE_SECONDS = 0.5
 LOT_RETRY_WAITS = (5, 8, 12, 20, 30, 45, 60, 60)
 SALES_CHUNK_SIZE = 300
 DEFAULT_TIME_BUDGET_MINUTES = 300
 DATA_DIR = "data"
 CACHE_COLUMNS = ["doc_type", "doc_id", "doc_date", "last_modified_time", "sku", "item_id", "quantity"]
 
-# (doc_type, list path, list key, id field, detail key). Invoices count as
-# sales, credit notes are subtracted as returns.
+# (doc_type, list path, list key, id field, detail key). Credit notes are
+# left out on purpose -- see the module docstring.
 SALES_DOCUMENTS = [
     ("invoice", "invoices", "invoices", "invoice_id", "invoice"),
-    ("creditnote", "creditnotes", "creditnotes", "creditnote_id", "creditnote"),
 ]
 
 
@@ -137,12 +139,27 @@ def sku_key(sku):
 
 # ---------------------------------------------------------------- phase 1: lots
 
-def fetch_lot_page(session, api_domain, organization_id, from_date, to_date, page):
+def authorized_get(session, token_store, url, params, timeout):
+    """GET with the current access token. A 401 gets one fresh token and one
+    retry -- Zoho caps live access tokens per refresh token and silently
+    revokes the oldest, which crashed the first live run (2026-10-29)."""
+    for attempt in range(2):
+        response = session.get(url, params=params, timeout=timeout,
+                               headers={"Authorization": f"Zoho-oauthtoken {token_store.get()}"})
+        if response.status_code != 401 or attempt:
+            return response
+        print(f"  401 from {url.rsplit('/', 1)[-1]}; refreshing access token", flush=True)
+        token_store.force_refresh()
+    return response
+
+
+def fetch_lot_page(session, api_domain, organization_id, token_store, from_date, to_date, page):
     """One page of the FIFO Cost Lot Tracking report, waiting out Zoho's
-    "still computing" state and 429s. The inventory-workflows toolkit found
-    that this report can serve a stale ThisMonth default instead of the
-    requested range when the access token is reused, so a suspiciously
-    short single page triggers a fresh token and a retry."""
+    "still computing" state (it can flip on mid-pagination) and 429s. The
+    inventory-workflows toolkit found that this report can serve a stale
+    ThisMonth default instead of the requested range when the access token
+    is reused, so a suspiciously short *first* page -- and only that -- gets
+    a fresh token before the retry."""
     params = {
         "organization_id": organization_id,
         "filter_by": "TransactionDate.CustomDate",
@@ -153,7 +170,7 @@ def fetch_lot_page(session, api_domain, organization_id, from_date, to_date, pag
     }
     url = f"{api_domain}/inventory/v1/reports/fifocostlottracking"
     for attempt, wait_s in enumerate(LOT_RETRY_WAITS):
-        response = session.get(url, params=params, timeout=120)
+        response = authorized_get(session, token_store, url, params, timeout=120)
         if response.status_code == 429:
             print(f"  lots page {page}: 429, waiting {wait_s}s", flush=True)
             time.sleep(wait_s)
@@ -165,21 +182,21 @@ def fetch_lot_page(session, api_domain, organization_id, from_date, to_date, pag
         in_progress = context.get("is_inv_txn_job_in_progress") is True
         looks_stale = page == 1 and not context.get("has_more_page") and len(rows) < 50
         if (in_progress or looks_stale) and attempt < len(LOT_RETRY_WAITS) - 1:
-            print(f"  lots page {page}: range not ready ({len(rows)} rows), fresh token + retry in {wait_s}s", flush=True)
+            print(f"  lots page {page}: range not ready ({len(rows)} rows), retry in {wait_s}s", flush=True)
             time.sleep(wait_s)
-            access_token, _ = common.get_access_token()
-            session.headers["Authorization"] = f"Zoho-oauthtoken {access_token}"
+            if looks_stale:
+                token_store.force_refresh()
             continue
         return rows, bool(context.get("has_more_page"))
     raise RuntimeError(f"Gave up on FIFO lot report page {page}")
 
 
-def fetch_lots(session, api_domain, organization_id, from_date, to_date):
+def fetch_lots(session, api_domain, organization_id, token_store, from_date, to_date):
     lots = []
     page = 1
     more = True
     while more and page <= LOT_MAX_PAGES:
-        rows, more = fetch_lot_page(session, api_domain, organization_id, from_date, to_date, page)
+        rows, more = fetch_lot_page(session, api_domain, organization_id, token_store, from_date, to_date, page)
         for row in rows:
             lot = normalize_lot(row, len(lots))
             if lot is not None:
@@ -187,7 +204,7 @@ def fetch_lots(session, api_domain, organization_id, from_date, to_date):
         if page % 10 == 0:
             print(f"  ...lots: {page} page(s), {len(lots)} inward lot(s) so far", flush=True)
         page += 1
-        time.sleep(1.0)
+        time.sleep(LOT_PAGE_PAUSE_SECONDS)
     if more:
         print(f"Warning: stopped after {LOT_MAX_PAGES} pages of lots; history is truncated.", file=sys.stderr, flush=True)
     return lots
@@ -241,13 +258,14 @@ def is_container_lot(lot, patterns):
 
 # ---------------------------------------------------------------- phase 2: sales
 
-def list_documents(session, api_domain, organization_id, path, list_key, id_field, since):
+def list_documents(session, api_domain, organization_id, token_store, path, list_key, id_field, since):
     """{doc_id: (date, last_modified_time)} for non-draft, non-void documents
     dated on/after `since`. Newest-first so pagination stops at `since`."""
     docs = {}
     page = 1
     while True:
-        response = session.get(
+        response = authorized_get(
+            session, token_store,
             f"{api_domain}/inventory/v1/{path}",
             params={
                 "organization_id": organization_id,
@@ -329,11 +347,8 @@ def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, 
     complete = True
 
     for doc_type, list_path, list_key, id_field, detail_key in SALES_DOCUMENTS:
-        # The detail fetches below can run for hours; listings use the
-        # session's header, so give it a current token each time.
-        session.headers["Authorization"] = f"Zoho-oauthtoken {token_store.get()}"
         try:
-            listed = list_documents(session, api_domain, organization_id, list_path, list_key, id_field, since)
+            listed = list_documents(session, api_domain, organization_id, token_store, list_path, list_key, id_field, since)
         except requests.exceptions.HTTPError as exc:
             if doc_type == "invoice":
                 raise
@@ -379,16 +394,15 @@ def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, 
     return cache, complete
 
 
-def daily_net_sales(cache):
-    """{SKU: {date: net qty}} -- invoices minus credit notes. Lines without
-    a SKU (e.g. freight or service lines) can't be matched to a lot."""
+def sales_by_sku_and_day(cache):
+    """{SKU: {date: qty}} from invoice lines. Lines without a SKU (e.g.
+    freight or service lines) can't be matched to a lot."""
     sales = defaultdict(lambda: defaultdict(float))
-    for (doc_type, _), entry in cache.items():
-        sign = -1.0 if doc_type == "creditnote" else 1.0
+    for entry in cache.values():
         doc_date = parse_date(entry["date"])
         for sku, _, qty in entry["lines"]:
             if sku_key(sku):
-                sales[sku_key(sku)][doc_date] += sign * qty
+                sales[sku_key(sku)][doc_date] += qty
     return sales
 
 
@@ -588,7 +602,8 @@ def build_notes(as_of, organization_id, lots_from, sales_complete, unmatched, n_
         "One row per container (one bill from a container supplier) that has ever arrived.",
         "Sellout % (Zoho FIFO) = (units in - units still on hand) / units in, straight from Zoho's FIFO Cost Lot "
         "Tracking report. It counts every way stock left: sales, but also transfers out and write-offs.",
-        "Sold % (Invoices) = units invoiced (net of credit notes) that FIFO matches to this container / units in.",
+        "Sold % (Invoices) = units invoiced that FIFO matches to this container / units in. Returns are not "
+        "subtracted: Zoho books a credit note as stock coming back in as a new lot, which then sells from there.",
         "Other Outflows = what Zoho shows as gone from the container that invoices don't account for "
         "(transfers to other orgs/stores, adjustments, damages).",
         "Sold % by Day N = share of the container invoiced within N days of arrival. Blank if the container "
@@ -639,7 +654,7 @@ def main():
     organization_id = common.resolve_organization_id(session, api_domain)
 
     print(f"Phase 1: FIFO lots {lots_from}..{as_of}", flush=True)
-    lots = fetch_lots(session, api_domain, organization_id, lots_from, as_of)
+    lots = fetch_lots(session, api_domain, organization_id, token_store, lots_from, as_of)
     if not lots:
         raise RuntimeError("FIFO Cost Lot Tracking returned no inward lots; nothing to report.")
     save_lots(organization_id, lots)
@@ -655,7 +670,7 @@ def main():
     print(f"Phase 2: sales since {first_lot}", flush=True)
     deadline = started + budget_min * 60
     cache, sales_complete = sync_sales(session, api_domain, organization_id, token_store, rate_limiter, first_lot, deadline)
-    daily_sales = daily_net_sales(cache)
+    daily_sales = sales_by_sku_and_day(cache)
 
     print("Phase 3: matching sales to containers", flush=True)
     container_rows, sku_rows, unmatched = build_report_data(lots, daily_sales, patterns, as_of)
