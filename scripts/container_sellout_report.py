@@ -71,7 +71,26 @@ Optional environment variables:
     SALES_FETCH_TIME_BUDGET_MINUTES    - stop fetching sales detail after this
                                          long and save progress, default 300
     RATE_LIMIT_PER_MINUTE              - defaults to 60
+    LOTS_REFRESH_DAYS                  - incremental runs re-pull only lots
+                                         dated within this many days, default 365
+    SALES_RECHECK_DAYS                 - incremental runs re-list only invoices
+                                         dated within this many days, default 90
+    FULL_REFRESH_DAYS                  - a full re-pull of every lot and invoice
+                                         listing runs when the last one is at
+                                         least this old, default 28
+    FULL_REFRESH                       - "true" forces a full re-pull now
+
+Saving API calls: the full lot history (back to 2019 for KTL) is ~1,000
+calls, and most of it never changes -- FIFO consumes the oldest stock first,
+so a year-old lot is almost always sold out (2026-10-30: only 207 of 17,142
+lots older than 2025 had any stock left). So normal runs re-pull only the
+last LOTS_REFRESH_DAYS of lots and keep the older ones from data/, and only
+re-list the last SALES_RECHECK_DAYS of invoices for edits/voids. Every
+FULL_REFRESH_DAYS a run re-pulls everything, which catches the rare late
+change to an old lot or invoice. The dates of the last full refresh live
+in data/sellout_state_<org>.json.
 """
+import json
 import csv
 import os
 import sys
@@ -88,7 +107,9 @@ from openpyxl.utils import get_column_letter
 import sales_by_item_common as common
 
 DEFAULT_LOTS_FROM_DATE = "2015-01-01"
-DEFAULT_SUPPLIER_PATTERNS = "UNCLE BILL,UNCLEBILL,UBL,AIWIBI,AIWINA,YIFAR,EFRIS STOCK"
+# "AWB Inventory Receipt (USD)" is the vendor on Aiwibi containers A04 onward
+# (Feb 2025); earlier ones were billed to YIFAR.
+DEFAULT_SUPPLIER_PATTERNS = "UNCLE BILL,UNCLEBILL,UBL,AIWIBI,AIWINA,YIFAR,AWB,EFRIS STOCK"
 CONTAINER_TRANSACTION_TYPES = ("bill", "purchase receive", "purchasereceive", "receive")
 SOLD_BY_DAYS = (30, 60, 90, 180)
 SOLD_SHARE_MILESTONES = (0.5, 0.8)
@@ -98,6 +119,11 @@ LOT_PAGE_PAUSE_SECONDS = 0.5
 LOT_RETRY_WAITS = (5, 8, 12, 20, 30, 45, 60, 60)
 SALES_CHUNK_SIZE = 300
 DEFAULT_TIME_BUDGET_MINUTES = 300
+DEFAULT_LOTS_REFRESH_DAYS = 365
+DEFAULT_SALES_RECHECK_DAYS = 90
+DEFAULT_FULL_REFRESH_DAYS = 28
+LOT_COLUMNS = ["date", "transaction_type", "transaction_number", "contact_name", "lot_number",
+               "sku", "item_name", "quantity_in", "quantity_on_hand", "unit_cost"]
 DATA_DIR = "data"
 CACHE_COLUMNS = ["doc_type", "doc_id", "doc_date", "last_modified_time", "sku", "item_id", "quantity"]
 
@@ -246,7 +272,7 @@ def supplier_of(contact_name, patterns):
         return None
     if "UNCLE" in name or name.startswith("UBL"):
         return "UBL"
-    if "AIWIBI" in name or "AIWINA" in name or "YIFAR" in name:
+    if "AIWIBI" in name or "AIWINA" in name or "YIFAR" in name or name.startswith("AWB"):
         return "Aiwibi"
     return contact_name
 
@@ -341,7 +367,9 @@ def document_lines(detail):
 
 
 def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, since, deadline):
-    """Brings the cached sales lines up to date. Returns (cache, complete)."""
+    """Brings the cached sales lines up to date. Only documents dated on or
+    after `since` are listed, checked for edits/voids and fetched; cached
+    documents older than that are kept as they are. Returns (cache, complete)."""
     path = cache_path(organization_id)
     cache = load_cache(path)
     complete = True
@@ -355,8 +383,10 @@ def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, 
             print(f"Warning: could not list {list_path} ({exc}); returns are not netted off.", file=sys.stderr, flush=True)
             continue
 
-        # Drop cached documents that were since voided/deleted or edited.
-        for key in [k for k in cache if k[0] == doc_type]:
+        # Drop cached documents in the listed window that were since
+        # voided/deleted or edited.
+        since_text = since.isoformat()
+        for key in [k for k in cache if k[0] == doc_type and cache[k]["date"] >= since_text]:
             current = listed.get(key[1])
             if current is None or current[1] != cache[key]["modified"]:
                 del cache[key]
@@ -595,7 +625,7 @@ def write_excel(container_rows, sku_rows, notes, output_path):
     workbook.save(output_path)
 
 
-def build_notes(as_of, organization_id, lots_from, sales_complete, unmatched, n_lots, n_container_lots):
+def build_notes(as_of, organization_id, refresh_note, sales_complete, unmatched, n_lots, n_container_lots):
     notes = [
         f"Container Sellout Report -- as of {as_of:%d %b %Y} (Zoho organization {organization_id})",
         "",
@@ -615,7 +645,7 @@ def build_notes(as_of, organization_id, lots_from, sales_complete, unmatched, n_
         "SKU's sales are matched oldest-container-first (FIFO), never more per container than Zoho's own FIFO "
         "says left it, and never before the container arrived.",
         "",
-        f"Lots pulled from {lots_from} onward: {n_lots:,} inward lots, {n_container_lots:,} of them container lots.",
+        f"{n_lots:,} inward lots, {n_container_lots:,} of them container lots. {refresh_note}",
         f"Sales that FIFO couldn't place in any lot (no stock on record at the time): {unmatched:,.0f} units.",
     ]
     if not sales_complete:
@@ -626,16 +656,75 @@ def build_notes(as_of, organization_id, lots_from, sales_complete, unmatched, n_
 
 # ---------------------------------------------------------------- main
 
+def lots_path(organization_id):
+    return os.path.join(DATA_DIR, f"fifo_lots_{organization_id}.csv")
+
+
 def save_lots(organization_id, lots):
-    path = os.path.join(DATA_DIR, f"fifo_lots_{organization_id}.csv")
     os.makedirs(DATA_DIR, exist_ok=True)
-    columns = ["date", "transaction_type", "transaction_number", "contact_name", "lot_number",
-               "sku", "item_name", "quantity_in", "quantity_on_hand", "unit_cost"]
-    with open(path, "w", newline="", encoding="utf-8") as handle:
+    with open(lots_path(organization_id), "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(columns)
-        for lot in sorted(lots, key=lambda l: (l["date"], l["transaction_number"], l["sku"])):
-            writer.writerow([lot[c].isoformat() if c == "date" else lot[c] for c in columns])
+        writer.writerow(LOT_COLUMNS)
+        for lot in sorted(lots, key=lambda l: (l["date"], l["seq"])):
+            writer.writerow([lot[c].isoformat() if c == "date" else lot[c] for c in LOT_COLUMNS])
+
+
+def load_lots(organization_id):
+    """The lots saved by the last run, or [] if there are none."""
+    path = lots_path(organization_id)
+    if not os.path.exists(path):
+        return []
+    lots = []
+    with open(path, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            lot = normalize_lot({**row, "cost_price_per_unit": row.get("unit_cost")}, len(lots))
+            if lot is not None:
+                lots.append(lot)
+    return lots
+
+
+def merge_lots(cached, fetched, cutoff):
+    """Older lots from the cache, everything from `cutoff` on from the fresh
+    pull. Split by date rather than matched lot by lot, because the report
+    has legitimately repeated rows (same date, bill, SKU and lot number)."""
+    merged = [l for l in cached if l["date"] < cutoff] + [l for l in fetched if l["date"] >= cutoff]
+    merged.sort(key=lambda l: (l["date"], l["seq"]))  # the two halves never share a date
+    for seq, lot in enumerate(merged):
+        lot["seq"] = seq
+    return merged
+
+
+def state_path(organization_id):
+    return os.path.join(DATA_DIR, f"sellout_state_{organization_id}.json")
+
+
+def load_state(organization_id):
+    try:
+        with open(state_path(organization_id), encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(organization_id, state):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(state_path(organization_id), "w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def plan_refresh(state, as_of, have_cached_lots):
+    """(full, reason) -- whether this run re-pulls everything."""
+    if (os.environ.get("FULL_REFRESH") or "").strip().lower() in ("1", "true", "yes"):
+        return True, "FULL_REFRESH requested"
+    last_full = state.get("last_full_refresh")
+    if not last_full or not have_cached_lots:
+        return True, "no earlier full refresh on record"
+    full_every = int(os.environ.get("FULL_REFRESH_DAYS") or DEFAULT_FULL_REFRESH_DAYS)
+    age = (as_of - datetime.strptime(last_full, "%Y-%m-%d").date()).days
+    if age >= full_every:
+        return True, f"last full refresh was {age} days ago"
+    return False, f"last full refresh {last_full} ({age} days ago)"
 
 
 def main():
@@ -653,10 +742,27 @@ def main():
     session.headers["Authorization"] = f"Zoho-oauthtoken {access_token}"
     organization_id = common.resolve_organization_id(session, api_domain)
 
-    print(f"Phase 1: FIFO lots {lots_from}..{as_of}", flush=True)
-    lots = fetch_lots(session, api_domain, organization_id, token_store, lots_from, as_of)
-    if not lots:
+    state = load_state(organization_id)
+    cached_lots = load_lots(organization_id)
+    full, why = plan_refresh(state, as_of, bool(cached_lots))
+    if full:
+        pull_from = lots_from
+    else:
+        pull_from = max(lots_from, as_of - timedelta(days=int(os.environ.get("LOTS_REFRESH_DAYS") or DEFAULT_LOTS_REFRESH_DAYS)))
+    print(f"{'Full' if full else 'Incremental'} run: {why}", flush=True)
+
+    print(f"Phase 1: FIFO lots {pull_from}..{as_of}", flush=True)
+    fetched = fetch_lots(session, api_domain, organization_id, token_store, pull_from, as_of)
+    if not fetched:
         raise RuntimeError("FIFO Cost Lot Tracking returned no inward lots; nothing to report.")
+    if full:
+        lots = fetched
+        refresh_note = f"Full refresh: every lot from {lots_from} re-pulled this run."
+    else:
+        lots = merge_lots(cached_lots, fetched, pull_from)
+        refresh_note = (f"Lots from {pull_from} re-pulled this run; older lots are from the last full refresh "
+                        f"({state.get('last_full_refresh')}).")
+        print(f"Kept {len(lots) - sum(l['date'] >= pull_from for l in lots)} cached lot(s) older than {pull_from}", flush=True)
     save_lots(organization_id, lots)
     container_lot_count = sum(1 for l in lots if is_container_lot(l, patterns))
     first_lot = min(l["date"] for l in lots)
@@ -667,14 +773,27 @@ def main():
     for (ttype, supplier), n in sorted(types.items(), key=lambda kv: -kv[1])[:15]:
         print(f"  {n:6d} lots  type={ttype!r:28} supplier={supplier}", flush=True)
 
-    print(f"Phase 2: sales since {first_lot}", flush=True)
+    # Re-list the whole invoice history only on a full run or while the
+    # first backfill is unfinished; otherwise just the recent window.
+    if full or not state.get("sales_backfill_complete"):
+        sales_since = first_lot
+    else:
+        sales_since = max(first_lot, as_of - timedelta(days=int(os.environ.get("SALES_RECHECK_DAYS") or DEFAULT_SALES_RECHECK_DAYS)))
+    print(f"Phase 2: invoices since {sales_since}", flush=True)
     deadline = started + budget_min * 60
-    cache, sales_complete = sync_sales(session, api_domain, organization_id, token_store, rate_limiter, first_lot, deadline)
+    cache, sales_complete = sync_sales(session, api_domain, organization_id, token_store, rate_limiter, sales_since, deadline)
+    if sales_since == first_lot:
+        state["sales_backfill_complete"] = sales_complete
+    if full:
+        state["last_full_refresh"] = as_of.isoformat()
+    state["last_run"] = as_of.isoformat()
+    save_state(organization_id, state)
     daily_sales = sales_by_sku_and_day(cache)
 
     print("Phase 3: matching sales to containers", flush=True)
     container_rows, sku_rows, unmatched = build_report_data(lots, daily_sales, patterns, as_of)
-    notes = build_notes(as_of, organization_id, lots_from, sales_complete, unmatched, len(lots), container_lot_count)
+    sales_complete = sales_complete and state.get("sales_backfill_complete", False)
+    notes = build_notes(as_of, organization_id, refresh_note, sales_complete, unmatched, len(lots), container_lot_count)
 
     output_path = os.path.join("reports", f"Container_Sellout_{as_of:%d_%m_%Y}.xlsx")
     write_excel(container_rows, sku_rows, notes, output_path)

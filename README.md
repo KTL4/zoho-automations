@@ -238,7 +238,8 @@ FIFO (oldest stock sells first), the same way Zoho values stock:
    (`reports/fifocostlottracking`) gives every inward lot per SKU, with
    quantity in and quantity still on hand. Container lots are bills /
    purchase receives from the suppliers in `CONTAINER_SUPPLIER_PATTERNS`
-   (UBL, Aiwibi, EFRIS STOCK by default), grouped by bill number. This
+   (UBL, Aiwibi -- billed as YIFAR or "AWB Inventory Receipt" -- and EFRIS
+   STOCK by default), grouped by bill number. This
    alone gives the headline Sellout %, but it counts every outflow
    (transfers and write-offs as well as sales).
 2. **Sales.** Every non-draft, non-void invoice since the first lot, at line
@@ -255,6 +256,16 @@ FIFO (oldest stock sells first), the same way Zoho values stock:
 The raw lot pull is saved alongside, as `data/fifo_lots_<org>.csv`, so the
 data behind any report can be checked.
 
+**Saving API calls:** the full lot history is ~1,000 calls for KTL, and
+almost all of it is old, sold-out stock that never changes. So a normal run
+re-pulls only the last 365 days of lots (`LOTS_REFRESH_DAYS`), keeps older
+lots from `data/fifo_lots_<org>.csv`, and re-lists only the last 90 days of
+invoices for edits/voids (`SALES_RECHECK_DAYS`). Every 28 days
+(`FULL_REFRESH_DAYS`), or when the `full_refresh` box is ticked on a manual
+run, it re-pulls everything to catch rare late changes to old lots. The date
+of the last full refresh is in `data/sellout_state_<org>.json`. A normal run
+is roughly a quarter of the calls of a full one.
+
 **Live run history:**
 - **2026-10-29** (first run, KTL org 780891784): the lot pull worked and
   found containers C1 (Dec 2019) onward as "UBL Inventory Receipt" bills,
@@ -265,6 +276,10 @@ data behind any report can be checked.
   raising the cap, minting a token only for a stale first page, and
   refreshing on any 401. It also showed that 8,215 of the lots are credit
   notes, which is why returns are no longer netted off sales.
+- **2026-10-30** (run 2): succeeded, PARTIAL (3,548 invoices left for the
+  next run). 27,057 lots, 40 containers -- but it missed all 17 Aiwibi
+  containers billed to vendor "AWB Inventory Receipt (USD)" (A04 onward,
+  LCL W1/W2), because "AWB" wasn't a supplier pattern. Fixed; 57 containers.
 
 **First run (backfill):** fetching every historical invoice can take
 longer than one GitHub Actions job allows. The script stops fetching after
