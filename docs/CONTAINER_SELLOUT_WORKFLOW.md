@@ -31,7 +31,7 @@ Runs never overlap (`concurrency` group), because each run rewrites the sales ca
    kept, because opening stock and adjustments compete with containers
    under FIFO. A lot counts as a **container lot** when it is a bill or
    purchase receive from a contact matching `CONTAINER_SUPPLIER_PATTERNS`
-   (default: Uncle Bill / UBL, Aiwibi / Aiwina / Yifar, EFRIS STOCK).
+   (default: Uncle Bill / UBL, Aiwibi / Aiwina / Yifar / AWB, EFRIS STOCK).
    Container = bill number. The log prints the 15 most common lot types
    and suppliers, so you can see what was or wasn't counted.
 2. **Sales.** Lists every non-draft, non-void invoice since the first
@@ -42,6 +42,22 @@ Runs never overlap (`concurrency` group), because each run rewrites the sales ca
    arrived by that date and still had room. A lot's room is what Zoho
    says left it (units in − on hand).
 4. **Write** `reports/Container_Sellout_DD_MM_YYYY.xlsx`, dated for the run day.
+
+### Normal runs vs full refreshes
+
+| | Normal run | Full refresh |
+|---|---|---|
+| When | Every run, unless a full one is due | Every 28 days, or tick `full_refresh` on a manual run |
+| Lots re-pulled | Last 365 days (~7,000 lots for KTL) | All history (~27,000 lots, ~1,000 calls, ~1 hour) |
+| Older lots | Kept from `data/fifo_lots_<org>.csv` | Re-pulled |
+| Invoices re-listed for edits/voids | Last 90 days | All history |
+| Invoice details fetched | Only new or edited invoices | Only new or edited invoices |
+
+FIFO uses up the oldest stock first, so lots more than a year old are
+almost always sold out (on 2026-10-30, 207 of 17,142 pre-2025 lots had any
+stock left, about 8,400 units). Their figures can lag by up to 28 days on a
+normal run. The state file `data/sellout_state_<org>.json` records the last
+full refresh and whether the first invoice backfill has finished.
 
 ## 3. Commit
 
@@ -71,6 +87,10 @@ Download the latest file from `reports/` and save it to
 | `CONTAINER_SUPPLIER_PATTERNS` | UBL, Aiwibi, EFRIS STOCK names | Which contacts count as container suppliers |
 | `LOTS_FROM_DATE` | 2015-01-01 | Earliest lot to pull |
 | `SALES_FETCH_TIME_BUDGET_MINUTES` | 300 | Stop fetching invoices after this long and save progress |
+| `LOTS_REFRESH_DAYS` | 365 | Lots re-pulled on a normal run |
+| `SALES_RECHECK_DAYS` | 90 | Invoices re-listed on a normal run |
+| `FULL_REFRESH_DAYS` | 28 | How often a full refresh runs |
+| `FULL_REFRESH` | workflow input | `true` forces a full refresh |
 | `RATE_LIMIT_PER_MINUTE` | 60 | Zoho API calls per minute |
 
 ## Known quirks / design decisions

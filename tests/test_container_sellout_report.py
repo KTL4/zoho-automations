@@ -1,7 +1,9 @@
 import datetime
+import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -74,6 +76,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(report.supplier_of("UNCLE BILL LIMITED", PATTERNS), "UBL")
         self.assertEqual(report.supplier_of("Aiwibi Trading", PATTERNS), "Aiwibi")
         self.assertEqual(report.supplier_of("EFRIS STOCK", PATTERNS), "EFRIS STOCK")
+        # Aiwibi containers A04 onward are billed to this vendor; the first
+        # live report missed all 17 of them.
+        self.assertEqual(report.supplier_of("AWB Inventory Receipt (USD)", PATTERNS), "Aiwibi")
         self.assertIsNone(report.supplier_of("Local Hardware", PATTERNS))
 
 
@@ -84,6 +89,40 @@ def fake_response(payload, status=200):
     response.headers = {}
     response.raise_for_status = MagicMock()
     return response
+
+
+class IncrementalRefreshTests(unittest.TestCase):
+    def test_merge_takes_old_lots_from_cache_and_recent_from_fetch(self):
+        cached = [lot(0, D(2024, 1, 1), 10, 5), lot(1, D(2025, 6, 1), 10, 9)]
+        fetched = [lot(0, D(2024, 1, 1), 10, 0),   # pre-cutoff row in the pull is ignored
+                   lot(1, D(2025, 6, 1), 10, 2), lot(2, D(2025, 6, 1), 10, 2)]  # repeated row kept twice
+        merged = report.merge_lots(cached, fetched, D(2025, 1, 1))
+        self.assertEqual([(l["date"], l["quantity_on_hand"]) for l in merged],
+                         [(D(2024, 1, 1), 5), (D(2025, 6, 1), 2), (D(2025, 6, 1), 2)])
+        self.assertEqual([l["seq"] for l in merged], [0, 1, 2])
+
+    def test_plan_refresh(self):
+        today = D(2026, 10, 30)
+        with patch.dict(os.environ, {"FULL_REFRESH": "", "FULL_REFRESH_DAYS": ""}):
+            self.assertTrue(report.plan_refresh({}, today, True)[0])
+            self.assertTrue(report.plan_refresh({"last_full_refresh": "2026-10-29"}, today, False)[0])
+            self.assertFalse(report.plan_refresh({"last_full_refresh": "2026-10-20"}, today, True)[0])
+            self.assertTrue(report.plan_refresh({"last_full_refresh": "2026-10-02"}, today, True)[0])
+        with patch.dict(os.environ, {"FULL_REFRESH": "true"}):
+            self.assertTrue(report.plan_refresh({"last_full_refresh": "2026-10-29"}, today, True)[0])
+
+    def test_windowed_sync_keeps_older_cached_invoices(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(report, "DATA_DIR", tmp):
+            report.save_cache(report.cache_path("42"), {
+                ("invoice", "old"): {"date": "2025-01-05", "modified": "m1", "lines": [("A1", "", 3.0)]},
+                ("invoice", "new"): {"date": "2026-10-01", "modified": "m1", "lines": [("A1", "", 2.0)]},
+            })
+            listed = {"new": ("2026-10-01", "m1")}  # old invoice falls outside the listed window
+            with patch.object(report, "list_documents", return_value=listed):
+                cache, complete = report.sync_sales(MagicMock(), "https://api", "42", MagicMock(), MagicMock(),
+                                                    D(2026, 8, 1), time.monotonic() + 60)
+        self.assertTrue(complete)
+        self.assertEqual(set(cache), {("invoice", "old"), ("invoice", "new")})
 
 
 class TokenHandlingTests(unittest.TestCase):
@@ -126,8 +165,11 @@ class EndToEndTests(unittest.TestCase):
                     {"invoice_id": "i2", "date": "2026-01-12", "status": "void", "last_modified_time": "t1"}]
         detail_calls = []
 
+        lot_pulls = []
+
         def get(url, params=None, **_):
             if url.endswith("/reports/fifocostlottracking"):
+                lot_pulls.append(params["from_date"])
                 return fake_response({"fifo_cost_lot_tracking": lot_rows, "page_context": {"has_more_page": False}})
             if url.endswith("/invoices"):
                 return fake_response({"invoices": invoices, "page_context": {"has_more_page": False}})
@@ -152,7 +194,9 @@ class EndToEndTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 report.main()
-                report.main()  # second run: the invoice is cached, no detail call
+                report.main()  # second run: incremental, and the invoice is cached
+                with open(os.path.join("data", "sellout_state_42.json")) as handle:
+                    state = json.load(handle)
                 wb = load_workbook(os.path.join("reports", "Container_Sellout_01_04_2026.xlsx"))
                 self.assertTrue(os.path.exists(os.path.join("data", "sales_lines_42.csv")))
                 self.assertTrue(os.path.exists(os.path.join("data", "fifo_lots_42.csv")))
@@ -160,6 +204,9 @@ class EndToEndTests(unittest.TestCase):
                 os.chdir(cwd)
 
         self.assertEqual(len(detail_calls), 1)
+        self.assertEqual(lot_pulls, ["2015-01-01", "2025-04-01"])  # full, then only the last 365 days
+        self.assertEqual(state, {"last_full_refresh": "2026-04-01", "last_run": "2026-04-01",
+                                 "sales_backfill_complete": True})
         sheet = wb["Containers"]
         headers = [c.value for c in sheet[1]]
         row = dict(zip(headers, [c.value for c in sheet[2]]))
