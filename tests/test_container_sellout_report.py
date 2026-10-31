@@ -95,11 +95,36 @@ class IncrementalRefreshTests(unittest.TestCase):
     def test_merge_takes_old_lots_from_cache_and_recent_from_fetch(self):
         cached = [lot(0, D(2024, 1, 1), 10, 5), lot(1, D(2025, 6, 1), 10, 9)]
         fetched = [lot(0, D(2024, 1, 1), 10, 0),   # pre-cutoff row in the pull is ignored
-                   lot(1, D(2025, 6, 1), 10, 2), lot(2, D(2025, 6, 1), 10, 2)]  # repeated row kept twice
+                   lot(1, D(2025, 6, 1), 10, 2), lot(2, D(2025, 7, 1), 10, 2)]
         merged = report.merge_lots(cached, fetched, D(2025, 1, 1))
         self.assertEqual([(l["date"], l["quantity_on_hand"]) for l in merged],
-                         [(D(2024, 1, 1), 5), (D(2025, 6, 1), 2), (D(2025, 6, 1), 2)])
+                         [(D(2024, 1, 1), 5), (D(2025, 6, 1), 2), (D(2025, 7, 1), 2)])
         self.assertEqual([l["seq"] for l in merged], [0, 1, 2])
+
+    def test_repeated_lot_rows_are_counted_once(self):
+        # Live data, 2026-10-31: lot 2871458 (LCL W2, 2,400 wet wipes) came
+        # back twice; Zoho's bill shows it once.
+        row = {"date": "2025-12-13", "transaction_type": "bill", "transaction_number": "LCL W2 Inventory",
+               "contact_name": "AWB Inventory Receipt (USD)", "lot_number": "2871458", "sku": "AWB80-03",
+               "quantity_in": "2400", "quantity_on_hand": "0", "cost_price_per_unit": "1"}
+        other = {**row, "lot_number": "2871459", "sku": "AWB80-04"}
+        page = {"fifo_cost_lot_tracking": [row, row, other, row], "page_context": {"has_more_page": False}}
+        session = MagicMock()
+        session.get.return_value = fake_response(page)
+        token_store = MagicMock()
+        token_store.get.return_value = "tok"
+        with patch.object(report.time, "sleep"):
+            lots = report.fetch_lots(session, "https://api", "1", token_store, D(2025, 1, 1), D(2026, 1, 1))
+        self.assertEqual([(l["lot_number"], l["quantity_in"]) for l in lots], [("2871458", 2400), ("2871459", 2400)])
+        self.assertEqual([l["seq"] for l in lots], [0, 1])
+
+    def test_saved_lots_with_repeats_load_once(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(report, "DATA_DIR", tmp):
+            one = {**lot(0, D(2025, 12, 13), 2400, 0), "lot_number": "2871458"}
+            report.save_lots("42", [one, {**one, "seq": 1}, {**one, "seq": 2, "lot_number": ""},
+                                    {**one, "seq": 3, "lot_number": ""}])
+            loaded = report.load_lots("42")
+        self.assertEqual([l["lot_number"] for l in loaded], ["2871458", "", ""])  # blank lot numbers aren't merged
 
     def test_plan_refresh(self):
         today = D(2026, 10, 30)

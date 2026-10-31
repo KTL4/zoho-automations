@@ -219,13 +219,14 @@ def fetch_lot_page(session, api_domain, organization_id, token_store, from_date,
 
 def fetch_lots(session, api_domain, organization_id, token_store, from_date, to_date):
     lots = []
+    seen = set()
     page = 1
     more = True
     while more and page <= LOT_MAX_PAGES:
         rows, more = fetch_lot_page(session, api_domain, organization_id, token_store, from_date, to_date, page)
         for row in rows:
             lot = normalize_lot(row, len(lots))
-            if lot is not None:
+            if lot is not None and not is_repeat(lot, seen):
                 lots.append(lot)
         if page % 10 == 0:
             print(f"  ...lots: {page} page(s), {len(lots)} inward lot(s) so far", flush=True)
@@ -234,6 +235,21 @@ def fetch_lots(session, api_domain, organization_id, token_store, from_date, to_
     if more:
         print(f"Warning: stopped after {LOT_MAX_PAGES} pages of lots; history is truncated.", file=sys.stderr, flush=True)
     return lots
+
+
+def is_repeat(lot, seen):
+    """True for a lot already taken from this pull. The report repeats a
+    lot's row, identical in every field (~1,000 lots, ~990,000 units for
+    KTL on 2026-10-31), so without this a lot's units in are counted two
+    to four times. A lot number is unique within one pull; it is NOT stable
+    across days (Zoho renumbers lots when it recomputes FIFO), so this is
+    never used to match lots between pulls."""
+    if not lot["lot_number"]:
+        return False
+    if lot["lot_number"] in seen:
+        return True
+    seen.add(lot["lot_number"])
+    return False
 
 
 def normalize_lot(row, sequence):
@@ -675,18 +691,19 @@ def load_lots(organization_id):
     if not os.path.exists(path):
         return []
     lots = []
+    seen = set()  # saves made before repeats were dropped still carry them
     with open(path, newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             lot = normalize_lot({**row, "cost_price_per_unit": row.get("unit_cost")}, len(lots))
-            if lot is not None:
+            if lot is not None and not is_repeat(lot, seen):
                 lots.append(lot)
     return lots
 
 
 def merge_lots(cached, fetched, cutoff):
     """Older lots from the cache, everything from `cutoff` on from the fresh
-    pull. Split by date rather than matched lot by lot, because the report
-    has legitimately repeated rows (same date, bill, SKU and lot number)."""
+    pull. Split by date rather than matched by lot number, because Zoho
+    renumbers lots from one day to the next."""
     merged = [l for l in cached if l["date"] < cutoff] + [l for l in fetched if l["date"] >= cutoff]
     merged.sort(key=lambda l: (l["date"], l["seq"]))  # the two halves never share a date
     for seq, lot in enumerate(merged):
