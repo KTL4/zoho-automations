@@ -280,6 +280,13 @@ is roughly a quarter of the calls of a full one.
   next run). 27,057 lots, 40 containers -- but it missed all 17 Aiwibi
   containers billed to vendor "AWB Inventory Receipt (USD)" (A04 onward,
   LCL W1/W2), because "AWB" wasn't a supplier pattern. Fixed; 57 containers.
+- **2026-10-31** (run 5, first incremental run): ~400 calls in 9.5 minutes
+  (vs ~15,000 calls / 5 hours for a full backfill run), not PARTIAL. Checking
+  it against Zoho's own bill screens showed the FIFO report repeats a lot's
+  row, identical in every field: ~1,000 lots (~990,000 units) were counted
+  2-4 times in every run so far, inflating Units In (A001: 122,035 -> 53,677)
+  and deflating Sold % (A001: 47% -> 97%). Repeats are now dropped by lot
+  number; all 18 AIWIBI Baby Diapers 01 Small bills then match Zoho exactly.
 
 **First run (backfill):** fetching every historical invoice can take
 longer than one GitHub Actions job allows. The script stops fetching after
