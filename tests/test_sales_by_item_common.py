@@ -51,56 +51,58 @@ class WeekLabelTests(unittest.TestCase):
         self.assertEqual(common.week_label(datetime.date(2026, 9, 21)), "WK 39")
 
 
-class AggregateSalesTests(unittest.TestCase):
+class AggregateNetSalesTests(unittest.TestCase):
     def setUp(self):
         self.buckets = common.compute_week_buckets_ending_by(datetime.date(2026, 9, 27), 14)
 
-    def test_sums_quantities_into_correct_week_bucket(self):
-        invoices = [
-            {
-                "date": "2026-09-22",  # falls in the most recent bucket
-                "line_items": [
-                    {"item_id": "item-1", "quantity": 3},
-                    {"item_id": "item-2", "quantity": 1},
-                ],
-            },
-            {
-                "date": "2026-09-25",  # same week as above
-                "line_items": [{"item_id": "item-1", "quantity": 2}],
-            },
-            {
-                "date": "2026-06-24",  # oldest bucket (2026-06-22 .. 2026-06-28)
-                "line_items": [{"item_id": "item-1", "quantity": 10}],
-            },
-        ]
-        sales = common.aggregate_sales(invoices, self.buckets)
+    def _cache(self, **entries):
+        return entries
+
+    def test_sums_invoice_quantities_into_correct_week_bucket(self):
+        cache = {
+            ("invoice", "inv-1"): {"date": "2026-09-22", "modified": "x", "lines": [("item-1", 3), ("item-2", 1)]},
+            ("invoice", "inv-2"): {"date": "2026-09-25", "modified": "x", "lines": [("item-1", 2)]},  # same week
+            ("invoice", "inv-3"): {"date": "2026-06-24", "modified": "x", "lines": [("item-1", 10)]},  # oldest bucket
+        }
+        sales = common.aggregate_net_sales(cache, self.buckets)
 
         self.assertEqual(sales["item-1"][-1], 5)
         self.assertEqual(sales["item-2"][-1], 1)
         self.assertEqual(sales["item-1"][0], 10)
         self.assertEqual(sum(sales["item-2"]), 1)
 
-    def test_skips_invoices_outside_window_and_missing_dates(self):
-        invoices = [
-            {"date": "2020-01-01", "line_items": [{"item_id": "item-1", "quantity": 99}]},
-            {"line_items": [{"item_id": "item-1", "quantity": 5}]},  # no date
-            None,
-        ]
-        sales = common.aggregate_sales(invoices, self.buckets)
+    def test_credit_notes_are_subtracted(self):
+        cache = {
+            ("invoice", "inv-1"): {"date": "2026-09-22", "modified": "x", "lines": [("item-1", 10)]},
+            ("creditnote", "cn-1"): {"date": "2026-09-23", "modified": "x", "lines": [("item-1", 4)]},
+        }
+        sales = common.aggregate_net_sales(cache, self.buckets)
+        self.assertEqual(sales["item-1"][-1], 6)
+
+    def test_credit_note_nets_off_its_own_week_not_the_invoice_week(self):
+        cache = {
+            ("invoice", "inv-1"): {"date": "2026-06-24", "modified": "x", "lines": [("item-1", 10)]},  # oldest week
+            ("creditnote", "cn-1"): {"date": "2026-09-22", "modified": "x", "lines": [("item-1", 4)]},  # most recent week
+        }
+        sales = common.aggregate_net_sales(cache, self.buckets)
+        self.assertEqual(sales["item-1"][0], 10)
+        self.assertEqual(sales["item-1"][-1], -4)
+
+    def test_skips_entries_outside_window_and_with_bad_dates(self):
+        cache = {
+            ("invoice", "old"): {"date": "2020-01-01", "modified": "x", "lines": [("item-1", 99)]},
+            ("invoice", "bad-date"): {"date": "not-a-date", "modified": "x", "lines": [("item-1", 5)]},
+        }
+        sales = common.aggregate_net_sales(cache, self.buckets)
         self.assertEqual(sales, {})
 
-    def test_line_items_without_item_id_are_ignored(self):
-        invoices = [{"date": "2026-09-22", "line_items": [{"quantity": 5}]}]
-        sales = common.aggregate_sales(invoices, self.buckets)
-        self.assertEqual(sales, {})
 
-
-class FetchInvoiceIdsInWindowTests(unittest.TestCase):
-    def _make_response(self, invoices, has_more_page):
+class ListDocumentsInWindowTests(unittest.TestCase):
+    def _make_response(self, documents, has_more_page):
         response = MagicMock()
         response.raise_for_status = MagicMock()
         response.json.return_value = {
-            "invoices": invoices,
+            "invoices": documents,
             "page_context": {"has_more_page": has_more_page},
         }
         return response
@@ -112,7 +114,7 @@ class FetchInvoiceIdsInWindowTests(unittest.TestCase):
         page1 = self._make_response(
             [
                 {"invoice_id": "future", "date": "2026-10-05", "status": "paid"},  # newer than window
-                {"invoice_id": "inv-1", "date": "2026-09-20", "status": "paid"},
+                {"invoice_id": "inv-1", "date": "2026-09-20", "status": "paid", "last_modified_time": "t1"},
                 {"invoice_id": "inv-draft", "date": "2026-09-15", "status": "draft"},
                 {"invoice_id": "inv-void", "date": "2026-09-10", "status": "void"},
             ],
@@ -120,7 +122,7 @@ class FetchInvoiceIdsInWindowTests(unittest.TestCase):
         )
         page2 = self._make_response(
             [
-                {"invoice_id": "inv-2", "date": "2026-09-05", "status": "sent"},
+                {"invoice_id": "inv-2", "date": "2026-09-05", "status": "sent", "last_modified_time": "t2"},
                 {"invoice_id": "too-old", "date": "2026-08-20", "status": "paid"},  # should stop here
                 {"invoice_id": "never-fetched", "date": "2026-08-01", "status": "paid"},
             ],
@@ -130,24 +132,146 @@ class FetchInvoiceIdsInWindowTests(unittest.TestCase):
         session = MagicMock()
         session.get.side_effect = [page1, page2]
 
-        ids = common.fetch_invoice_ids_in_window(session, "https://api", "org1", window_start, window_end)
+        docs = common.list_documents_in_window(
+            session, "https://api", "org1", "invoices", "invoices", "invoice_id", window_start, window_end
+        )
 
-        self.assertEqual(ids, ["inv-1", "inv-2"])
+        self.assertEqual(docs, {"inv-1": ("2026-09-20", "t1"), "inv-2": ("2026-09-05", "t2")})
         self.assertEqual(session.get.call_count, 2)
 
     def test_stops_when_no_more_pages(self):
         window_start = datetime.date(2026, 9, 1)
         window_end = datetime.date(2026, 9, 30)
         page1 = self._make_response(
-            [{"invoice_id": "inv-1", "date": "2026-09-15", "status": "paid"}],
+            [{"invoice_id": "inv-1", "date": "2026-09-15", "status": "paid", "last_modified_time": "t1"}],
             has_more_page=False,
         )
         session = MagicMock()
         session.get.side_effect = [page1]
 
-        ids = common.fetch_invoice_ids_in_window(session, "https://api", "org1", window_start, window_end)
-        self.assertEqual(ids, ["inv-1"])
+        docs = common.list_documents_in_window(
+            session, "https://api", "org1", "invoices", "invoices", "invoice_id", window_start, window_end
+        )
+        self.assertEqual(docs, {"inv-1": ("2026-09-15", "t1")})
         self.assertEqual(session.get.call_count, 1)
+
+
+class DocCacheTests(unittest.TestCase):
+    def test_save_then_load_round_trips(self):
+        cache = {
+            ("invoice", "inv-1"): {"date": "2026-09-20", "modified": "t1", "lines": [("item-1", 3.0), ("item-2", 1.0)]},
+            ("creditnote", "cn-1"): {"date": "2026-09-21", "modified": "t2", "lines": [("item-1", 1.0)]},
+        }
+        path = os.path.join(os.path.dirname(__file__), "_tmp_test_cache.csv")
+        try:
+            common.save_doc_cache(path, cache)
+            loaded = common.load_doc_cache(path)
+            self.assertEqual(loaded, cache)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_document_with_no_lines_round_trips_as_cached_with_empty_lines(self):
+        cache = {("invoice", "empty-inv"): {"date": "2026-09-20", "modified": "t1", "lines": []}}
+        path = os.path.join(os.path.dirname(__file__), "_tmp_test_cache_empty.csv")
+        try:
+            common.save_doc_cache(path, cache)
+            loaded = common.load_doc_cache(path)
+            self.assertEqual(loaded, cache)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_load_missing_file_returns_empty_cache(self):
+        self.assertEqual(common.load_doc_cache("/nonexistent/path.csv"), {})
+
+
+class SyncDocumentsInWindowTests(unittest.TestCase):
+    def _list_response(self, documents, has_more_page=False):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"invoices": documents, "page_context": {"has_more_page": has_more_page}}
+        return response
+
+    def _detail_response(self, invoice):
+        response = MagicMock(status_code=200)
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"invoice": invoice}
+        return response
+
+    def _sync(self, session, cache, window_start=datetime.date(2026, 9, 1), window_end=datetime.date(2026, 9, 30)):
+        token_store = MagicMock()
+        token_store.get.return_value = "tok"
+        rate_limiter = MagicMock()
+        return common.sync_documents_in_window(
+            session, "https://api", "org1", token_store, rate_limiter,
+            cache, "invoice", "invoices", "invoices", "invoice_id", "invoice", window_start, window_end,
+        )
+
+    def test_new_documents_are_listed_then_fetched(self):
+        session = MagicMock()
+        session.get.side_effect = [
+            self._list_response([{"invoice_id": "inv-1", "date": "2026-09-20", "status": "paid", "last_modified_time": "t1"}]),
+            self._detail_response({"invoice_id": "inv-1", "line_items": [{"item_id": "item-1", "quantity": 3}]}),
+        ]
+
+        cache = self._sync(session, {})
+
+        self.assertEqual(cache[("invoice", "inv-1")]["lines"], [("item-1", 3)])
+        self.assertEqual(cache[("invoice", "inv-1")]["modified"], "t1")
+
+    def test_unchanged_cached_document_is_not_refetched(self):
+        session = MagicMock()
+        session.get.side_effect = [
+            self._list_response([{"invoice_id": "inv-1", "date": "2026-09-20", "status": "paid", "last_modified_time": "t1"}]),
+            # No detail response queued -- a second session.get call would raise StopIteration, failing the test.
+        ]
+        cache = {("invoice", "inv-1"): {"date": "2026-09-20", "modified": "t1", "lines": [("item-1", 3)]}}
+
+        result = self._sync(session, cache)
+
+        self.assertEqual(session.get.call_count, 1)  # only the list call, no detail fetch
+        self.assertEqual(result[("invoice", "inv-1")]["lines"], [("item-1", 3)])
+
+    def test_changed_last_modified_time_triggers_refetch(self):
+        session = MagicMock()
+        session.get.side_effect = [
+            self._list_response([{"invoice_id": "inv-1", "date": "2026-09-20", "status": "paid", "last_modified_time": "t2"}]),
+            self._detail_response({"invoice_id": "inv-1", "line_items": [{"item_id": "item-1", "quantity": 7}]}),
+        ]
+        cache = {("invoice", "inv-1"): {"date": "2026-09-20", "modified": "t1", "lines": [("item-1", 3)]}}
+
+        result = self._sync(session, cache)
+
+        self.assertEqual(result[("invoice", "inv-1")]["lines"], [("item-1", 7)])
+        self.assertEqual(result[("invoice", "inv-1")]["modified"], "t2")
+
+    def test_voided_or_deleted_document_is_dropped_from_cache(self):
+        session = MagicMock()
+        session.get.side_effect = [self._list_response([])]  # now draft/void/gone -- not listed at all
+        cache = {("invoice", "inv-1"): {"date": "2026-09-20", "modified": "t1", "lines": [("item-1", 3)]}}
+
+        result = self._sync(session, cache)
+
+        self.assertNotIn(("invoice", "inv-1"), result)
+
+    def test_cached_entries_outside_the_window_are_pruned(self):
+        session = MagicMock()
+        session.get.side_effect = [self._list_response([])]
+        cache = {("invoice", "old-inv"): {"date": "2026-01-01", "modified": "t1", "lines": [("item-1", 3)]}}
+
+        result = self._sync(session, cache)
+
+        self.assertNotIn(("invoice", "old-inv"), result)
+
+    def test_other_doc_types_in_cache_are_left_alone(self):
+        session = MagicMock()
+        session.get.side_effect = [self._list_response([])]
+        cache = {("creditnote", "cn-1"): {"date": "2026-09-20", "modified": "t1", "lines": [("item-1", 1)]}}
+
+        result = self._sync(session, cache)
+
+        self.assertIn(("creditnote", "cn-1"), result)
 
 
 class ExtractBrandTests(unittest.TestCase):

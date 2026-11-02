@@ -7,10 +7,11 @@ where x and y are the ISO week numbers of the oldest and most recent weeks
 in the window (e.g. Sales_by_item(WK1-WK36).xlsx).
 
 Run every Sunday by .github/workflows/item-runway-weekly-report.yml. Shares
-its core logic (auth, rate limiting, catalog fetch, invoice fetch,
-aggregation, filtering, Excel formatting) with item_runway_report.py via
-sales_by_item_common.py -- see that module's docstring for the full picture
-(why there's no direct report API, what gets filtered and why, and which
+its core logic (auth, rate limiting, catalog fetch, incremental
+invoice/credit-note caching, aggregation, filtering, Excel formatting) with
+item_runway_report.py via sales_by_item_common.py -- see that module's
+docstring for the full picture (why there's no direct report API, how the
+cache keeps steady-state runs cheap, what gets filtered and why, and which
 assumptions still need verifying against the real Zoho UI report).
 
 This script's own responsibility is just: a 36-period window anchored on
@@ -19,7 +20,10 @@ that means the week ending on that same Sunday is included as the most
 recent of the 36 (Zoho's own week hasn't fully closed until end of day, but
 by the time this runs the data is expected to be final). Run on any other
 day (e.g. a manual workflow_dispatch), it anchors on the most recent Sunday
-on or before that day instead.
+on or before that day instead. Its cache file
+(data/item_runway_cache_weekly.csv) is separate from the monthly report's,
+so the two independently-scheduled workflows never write to the same file
+in the same run.
 
 Required/optional environment variables: see sales_by_item_common.py.
 """
@@ -49,7 +53,7 @@ def main():
     output_path = f"reports/Sales_by_item(WK{oldest_week}-WK{newest_week}).xlsx"
 
     rate_limit_per_minute = int(os.environ.get("RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE))
-    run_report(rate_limit_per_minute, buckets, output_path)
+    run_report(rate_limit_per_minute, buckets, output_path, "data/item_runway_cache_weekly.csv")
 
 
 if __name__ == "__main__":
