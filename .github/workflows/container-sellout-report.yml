@@ -18,7 +18,7 @@ on:
         type: boolean
         default: false
       max_api_calls:
-        description: "Stop before making more than this many Zoho API calls (blank = no limit)"
+        description: "Stop before making more than this many Zoho API calls (blank = no limit; never applies to a full refresh)"
         required: false
         type: string
 
@@ -42,13 +42,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A late-starting scheduled run must not repeat a run the backup
+      # trigger (a Claude Code scheduled task at 19:10 EAT) already did.
+      - name: Skip if today's report already exists
+        id: guard
+        run: |
+          today=$(TZ=Africa/Nairobi date +%d_%m_%Y)
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "reports/Container_Sellout_${today}.xlsx" ]; then
+            echo "Report for ${today} already exists; skipping this scheduled run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.skip != 'true'
         with:
           python-version: "3.12"
 
       - run: pip install -r requirements.txt
+        if: steps.guard.outputs.skip != 'true'
 
       - name: Generate Container Sellout report
+        if: steps.guard.outputs.skip != 'true'
         env:
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
@@ -57,13 +71,15 @@ jobs:
           REPORT_AS_OF_DATE: ${{ inputs.as_of_date }}
           SALES_FETCH_TIME_BUDGET_MINUTES: "300"
           FULL_REFRESH: ${{ inputs.full_refresh }}
-          MAX_API_CALLS: ${{ inputs.max_api_calls }}
+          # Scheduled (weekly) runs are capped at 500 calls; a full refresh
+          # lifts the cap inside the script.
+          MAX_API_CALLS: ${{ github.event_name == 'schedule' && '500' || inputs.max_api_calls }}
         run: python -u scripts/container_sellout_report.py
 
       - name: Commit report and data to repo
         # Commit the sales cache even if the report step failed, so a long
         # backfill never loses the invoices it already fetched.
-        if: always()
+        if: always() && steps.guard.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

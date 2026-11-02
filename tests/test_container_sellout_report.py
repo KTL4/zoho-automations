@@ -177,6 +177,37 @@ class CallBudgetTests(unittest.TestCase):
                 report.main()
         self.assertEqual(stop.exception.code, 2)
 
+    def test_full_refresh_lifts_the_limit_but_normal_runs_keep_it(self):
+        budgets = []
+        real = report.CallBudget
+
+        def capture(limit):
+            budget = real(limit)
+            budgets.append(budget)
+            return budget
+
+        session = MagicMock()
+        session.get.return_value = fake_response({"fifo_cost_lot_tracking": [
+            {"date": "2026-01-01", "transaction_type": "Bill", "transaction_number": "C30", "contact_name": "Uncle Bill",
+             "lot_number": str(n), "sku": f"A{n}", "quantity_in": 1, "quantity_on_hand": 0} for n in range(60)],
+            "invoices": [], "page_context": {"has_more_page": False}})
+        session.headers = {}
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(report, "CallBudget", side_effect=capture), \
+                patch.object(report.requests, "Session", return_value=session), \
+                patch.object(report.common, "get_access_token", return_value=("tok", "https://api")), \
+                patch.object(report.time, "sleep"), \
+                patch.dict(os.environ, {"ZOHO_ORGANIZATION_ID": "42", "REPORT_AS_OF_DATE": "2026-04-01",
+                                        "MAX_API_CALLS": "500", "FULL_REFRESH": ""}):
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                report.main()  # no state yet -> full refresh
+                report.main()  # incremental
+            finally:
+                os.chdir(cwd)
+        self.assertEqual([b.limit for b in budgets], [0, 500])
+
     def test_zero_means_no_limit(self):
         budget = report.CallBudget(0)
         for _ in range(1000):
