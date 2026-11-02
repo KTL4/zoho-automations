@@ -1,0 +1,60 @@
+name: Sales Ledger Weekly Update
+
+on:
+  schedule:
+    # 20:00 UTC every Saturday = 23:00 East Africa Time (owner's choice,
+    # 2026-11-02). Adds the week's invoices and credit notes and corrects
+    # any earlier sale that was edited, voided or deleted in Zoho.
+    - cron: "0 20 * * 6"
+  workflow_dispatch:
+    inputs:
+      max_api_calls:
+        description: "Stop fetching before this many Zoho API calls (blank = no limit)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+# The ledger in data/ is read and rewritten by every run, so two runs must
+# never overlap.
+concurrency:
+  group: sales-ledger
+  cancel-in-progress: false
+
+jobs:
+  update-ledger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Update sales ledger
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          ZOHO_ORGANIZATION_ID: ${{ secrets.ZOHO_ORGANIZATION_ID }}
+          # A normal week is ~400 calls. Anything left over is fetched by
+          # the next run (the log says PARTIAL).
+          MAX_API_CALLS: ${{ github.event_name == 'schedule' && '1000' || inputs.max_api_calls }}
+        run: python -u scripts/sales_ledger.py
+
+      - name: Commit ledger and Sales file to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/Sales_13.xlsx data/sales_ledger_*
+          if ! git diff --staged --quiet; then
+            git commit -m "Update Sales ledger for $(TZ=Africa/Nairobi date +%F)"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          else
+            echo "No sales changes to commit."
+          fi
