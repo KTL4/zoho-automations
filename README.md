@@ -216,9 +216,9 @@ for a normal run using the real current date.
 
 ## Container Sellout Report
 
-`scripts/container_sellout_report.py`, run at 06:15 East Africa Time every
-Monday by `.github/workflows/container-sellout-report.yml` (also runnable
-on demand from the Actions tab). Full walkthrough:
+`scripts/container_sellout_report.py`, run on demand from the Actions tab
+via `.github/workflows/container-sellout-report.yml` (manual only since
+2026-11-02; it used to run every Monday at 06:15 East Africa Time). Full walkthrough:
 `docs/CONTAINER_SELLOUT_WORKFLOW.md`.
 
 Produces `reports/Container_Sellout_DD_MM_YYYY.xlsx` with three tabs:
