@@ -14,6 +14,10 @@ on:
         required: false
         type: boolean
         default: false
+      max_api_calls:
+        description: "Stop before making more than this many Zoho API calls (blank = no limit)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -50,6 +54,7 @@ jobs:
           REPORT_AS_OF_DATE: ${{ inputs.as_of_date }}
           SALES_FETCH_TIME_BUDGET_MINUTES: "300"
           FULL_REFRESH: ${{ inputs.full_refresh }}
+          MAX_API_CALLS: ${{ inputs.max_api_calls }}
         run: python -u scripts/container_sellout_report.py
 
       - name: Commit report and data to repo

@@ -71,6 +71,9 @@ Optional environment variables:
     SALES_FETCH_TIME_BUDGET_MINUTES    - stop fetching sales detail after this
                                          long and save progress, default 300
     RATE_LIMIT_PER_MINUTE              - defaults to 60
+    MAX_API_CALLS                      - stop the run before making more than
+                                         this many Zoho API requests (retries
+                                         count); blank or 0 = no limit
     LOTS_REFRESH_DAYS                  - incremental runs re-pull only lots
                                          dated within this many days, default 365
     SALES_RECHECK_DAYS                 - incremental runs re-list only invoices
@@ -94,6 +97,7 @@ import json
 import csv
 import os
 import sys
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -164,6 +168,40 @@ def sku_key(sku):
 
 
 # ---------------------------------------------------------------- phase 1: lots
+
+class ApiCallLimitReached(Exception):
+    """Raised instead of making a request that would go over MAX_API_CALLS.
+    Deliberately not a requests exception, so no retry loop swallows it."""
+
+
+class CallBudget:
+    """Counts every Zoho API request this run makes, across all threads."""
+
+    def __init__(self, limit):
+        self._lock = threading.Lock()
+        self.limit = limit
+        self.used = 0
+
+    def take(self):
+        with self._lock:
+            if self.limit and self.used >= self.limit:
+                raise ApiCallLimitReached(f"API call limit of {self.limit} reached")
+            self.used += 1
+
+
+def install_call_budget(session, budget):
+    """Routes every request the session makes (lot pages, invoice lists,
+    invoice details, the organization lookup) through `budget`. The OAuth
+    token exchange uses its own requests.post, which goes to Zoho Accounts
+    rather than the Inventory API, so it isn't counted."""
+    send = session.request
+
+    def counted_request(*args, **kwargs):
+        budget.take()
+        return send(*args, **kwargs)
+
+    session.request = counted_request
+
 
 def authorized_get(session, token_store, url, params, timeout):
     """GET with the current access token. A 401 gets one fresh token and one
@@ -745,6 +783,18 @@ def plan_refresh(state, as_of, have_cached_lots):
 
 
 def main():
+    budget = CallBudget(int(os.environ.get("MAX_API_CALLS") or 0))
+    try:
+        run(budget)
+    except ApiCallLimitReached:
+        print(f"STOPPED: this run reached its limit of {budget.limit} Zoho API calls before finishing. "
+              "Invoices fetched so far are saved in data/; no report was written.", file=sys.stderr, flush=True)
+        sys.exit(2)
+    finally:
+        print(f"Zoho API calls this run: {budget.used}" + (f" (limit {budget.limit})" if budget.limit else ""), flush=True)
+
+
+def run(budget):
     started = time.monotonic()
     report_tz = ZoneInfo(os.environ.get("REPORT_TZ") or "Africa/Nairobi")
     as_of = common.resolve_today(report_tz)
@@ -756,6 +806,7 @@ def main():
     access_token, api_domain = common.get_access_token()
     token_store = common.TokenStore(access_token)
     session = requests.Session()
+    install_call_budget(session, budget)
     session.headers["Authorization"] = f"Zoho-oauthtoken {access_token}"
     organization_id = common.resolve_organization_id(session, api_domain)
 

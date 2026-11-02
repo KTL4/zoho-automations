@@ -150,6 +150,40 @@ class IncrementalRefreshTests(unittest.TestCase):
         self.assertEqual(set(cache), {("invoice", "old"), ("invoice", "new")})
 
 
+class CallBudgetTests(unittest.TestCase):
+    def test_requests_stop_at_the_limit_and_are_counted(self):
+        session = MagicMock()
+        session.request.return_value = "response"
+        budget = report.CallBudget(3)
+        report.install_call_budget(session, budget)
+        for _ in range(3):
+            self.assertEqual(session.request("GET", "https://api/x"), "response")
+        with self.assertRaises(report.ApiCallLimitReached):
+            session.request("GET", "https://api/x")
+        self.assertEqual(budget.used, 3)
+
+    def test_limit_is_not_swallowed_by_detail_retries(self):
+        # fetch_detail retries requests exceptions; the limit must escape it.
+        session = MagicMock()
+        session.get.side_effect = report.ApiCallLimitReached("limit")
+        with self.assertRaises(report.ApiCallLimitReached):
+            report.common.fetch_detail(session, "https://api", "org", MagicMock(), MagicMock(),
+                                       url="https://api/invoices/1", result_key="invoice", label="invoice 1")
+
+    def test_main_exits_cleanly_when_the_limit_is_hit(self):
+        with patch.object(report, "run", side_effect=report.ApiCallLimitReached("limit")), \
+                patch.dict(os.environ, {"MAX_API_CALLS": "500"}):
+            with self.assertRaises(SystemExit) as stop:
+                report.main()
+        self.assertEqual(stop.exception.code, 2)
+
+    def test_zero_means_no_limit(self):
+        budget = report.CallBudget(0)
+        for _ in range(1000):
+            budget.take()
+        self.assertEqual(budget.used, 1000)
+
+
 class TokenHandlingTests(unittest.TestCase):
     def test_401_refreshes_token_once_and_retries(self):
         session = MagicMock()
