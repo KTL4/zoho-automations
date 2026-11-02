@@ -1,8 +1,11 @@
 name: Container Sellout Report
 
-# Manual runs only (schedule removed 2026-11-02 at the owner's request; it
-# used to run every Monday 03:15 UTC). Start it from the Actions tab.
 on:
+  schedule:
+    # 16:00 UTC every Saturday = 19:00 East Africa Time (owner's choice,
+    # 2026-11-02). A normal run is ~300 Zoho API calls; the full refresh
+    # every 28 days is ~1,100.
+    - cron: "0 16 * * 6"
   workflow_dispatch:
     inputs:
       as_of_date:

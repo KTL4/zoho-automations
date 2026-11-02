@@ -7,10 +7,10 @@ How much of every container that has ever arrived has sold, and how fast.
 ```
  Trigger              Phase 1: Lots          Phase 2: Sales         Phase 3: Match       Output
 ┌────────────┐      ┌────────────────┐     ┌──────────────────┐   ┌───────────────┐   ┌──────────────────────┐
-│ Manual     │ ───▶ │ Zoho FIFO Cost │ ──▶ │ Invoices, line   │──▶│ FIFO: each    │──▶│ reports/Container_   │
-│ run from   │      │ Lot Tracking   │     │ level            │   │ SKU's sales → │   │ Sellout_DD_MM_YYYY   │
-│ Actions    │      │ (every lot ever│     │ (cached in data/,│   │ oldest lot    │   │ .xlsx                │
-│ tab        │      │  received)     │     │  only new/edited │   │ first         │   │ + data/*.csv         │
+│ Saturday   │ ───▶ │ Zoho FIFO Cost │ ──▶ │ Invoices, line   │──▶│ FIFO: each    │──▶│ reports/Container_   │
+│ 16:00 UTC  │      │ Lot Tracking   │     │ level            │   │ SKU's sales → │   │ Sellout_DD_MM_YYYY   │
+│ or manual  │      │ (every lot ever│     │ (cached in data/,│   │ oldest lot    │   │ .xlsx                │
+│ run        │      │  received)     │     │  only new/edited │   │ first         │   │ + data/*.csv         │
 └────────────┘      └────────────────┘     │  fetched)        │   └───────────────┘   └──────────────────────┘
                                            └──────────────────┘
 ```
@@ -18,7 +18,8 @@ How much of every container that has ever arrived has sold, and how fast.
 ## 1. Trigger
 
 `.github/workflows/container-sellout-report.yml`:
-- **Manual only** since 2026-11-02 (it used to run every Monday at 03:15 UTC / 06:15 EAT).
+- Scheduled every **Saturday at 16:00 UTC** (19:00 EAT). Until 2026-11-02 it ran Mondays at 06:15 EAT.
+- GitHub can start scheduled runs late (the SOH report has seen delays of hours); the run still uses that day's date.
 - Manual: GitHub → Actions → *Container Sellout Report* → **Run workflow**.
   The optional `as_of_date` input (YYYY-MM-DD) runs it as if it were that date.
 
