@@ -91,6 +91,7 @@ Download the latest file from `reports/` and save it to
 | `SALES_RECHECK_DAYS` | 90 | Invoices re-listed on a normal run |
 | `FULL_REFRESH_DAYS` | 28 | How often a full refresh runs |
 | `FULL_REFRESH` | workflow input | `true` forces a full refresh |
+| `MAX_API_CALLS` | workflow input `max_api_calls`, blank = none | Hard cap on Zoho API requests (retries count). On reaching it the run stops, keeps the invoices fetched so far, writes no report, and fails with "STOPPED: ... limit". Every run logs "Zoho API calls this run: N" |
 | `RATE_LIMIT_PER_MINUTE` | 60 | Zoho API calls per minute |
 
 ## Known quirks / design decisions
