@@ -14,6 +14,12 @@ on:
 permissions:
   contents: write
 
+# data/item_runway_cache_weekly.csv is read and rewritten by every run, so
+# two runs must never overlap.
+concurrency:
+  group: item-runway-weekly-report
+  cancel-in-progress: false
+
 jobs:
   generate-report:
     runs-on: ubuntu-latest
@@ -36,11 +42,16 @@ jobs:
           REPORT_AS_OF_DATE: ${{ inputs.as_of_date }}
         run: python -u scripts/item_runway_weekly_report.py
 
-      - name: Commit report to repo
+      - name: Commit report and cache to repo
+        # Commit the cache even if the report step failed, so a run that
+        # dies partway through never loses the invoices/credit notes it
+        # already fetched.
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "reports/Sales_by_item(WK"*.xlsx
+          git add "reports/Sales_by_item(WK"*.xlsx 2>/dev/null || true
+          git add data/item_runway_cache_weekly.csv 2>/dev/null || true
           if ! git diff --staged --quiet; then
             git commit -m "Add Item Runway weekly report for $(date -u +%F)"
             git pull --rebase origin main

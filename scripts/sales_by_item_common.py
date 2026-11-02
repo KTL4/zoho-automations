@@ -7,9 +7,9 @@ comparison, run every Sunday). Both replicate Zoho Inventory's Reports >
 Sales by Item; the only differences between them are the comparison window
 length, the reference date used to anchor that window, and the output
 filename pattern -- everything else (auth, rate limiting, catalog fetch,
-invoice fetch, aggregation, filtering, Excel formatting) lives here so a
-fix in one place (e.g. the rate limiter) benefits both automations instead
-of needing to be duplicated and kept in sync by hand.
+document fetch/caching, aggregation, filtering, Excel formatting) lives
+here so a fix in one place (e.g. the rate limiter) benefits both
+automations instead of needing to be duplicated and kept in sync by hand.
 
 Zoho Inventory's API has no direct "Sales by Item" report endpoint (a Zoho
 community thread confirms this gap: "this functionality exists in the
@@ -22,27 +22,76 @@ transactional data instead:
      every item, restricted to stock-tracked ("inventory" type) items --
      this drops non-sellable catalog entries like freight/container line
      items (e.g. "20FT Container") that aren't part of physical stock.
-  2. Every non-draft, non-void invoice dated within the comparison window
-     is listed (cheap, paginated, sorted newest-first so pagination can
-     stop as soon as it walks past the window) and then fetched in full
-     (one call per invoice, same as the per-item calls in the SOH report)
-     to get its line items.
+     Fetched fresh every run (not cached): the catalog is small (~1,800
+     items) and fixed-cost, unlike the open-ended invoice/credit-note
+     volume below.
+  2. Every non-draft, non-void invoice *and credit note* dated within the
+     comparison window is tracked incrementally in a cache file committed
+     to the repo (see "Incremental caching" below) -- cheap to list, so
+     listed again in full every run, but detail (line items) is only
+     fetched for documents that are new or whose `last_modified_time`
+     changed since the cache was last updated.
   3. Each line item's quantity is summed into the Monday-Sunday week its
-     invoice date falls in.
-  4. Items with zero sales across the entire window are dropped from the
-     output -- the report only lists items that actually sold at least
-     once in the window.
+     document's date falls in -- added for invoices, subtracted for credit
+     notes (a return reduces that week's net quantity sold).
+  4. Items with net-zero quantity across the entire window are dropped from
+     the output -- the report only lists items that actually sold at least
+     one net unit in the window.
 
-Both the catalog fetch and the invoice detail fetch hit the API far harder
-than a naive loop can survive -- soh_daily_report.py's production run once
-crashed after being 429'd for ~30 minutes straight -- so both phases share
-the same rate limiter, heartbeat logging, and retry-with-backoff pattern
-that fixed that.
+Both the catalog fetch and the document detail fetch hit the API far
+harder than a naive loop can survive -- soh_daily_report.py's production
+run once crashed after being 429'd for ~30 minutes straight -- so both
+phases share the same rate limiter, heartbeat logging, and
+retry-with-backoff pattern that fixed that.
+
+Incremental caching (added 2026-11-02, after the first few live runs made
+clear how expensive a full window re-fetch is -- see the README for the
+exact call counts): each report keeps its own cache file in data/ (one per
+entry-point script, so the independently-scheduled weekly and monthly
+reports never write to the same file in the same run), listing every
+invoice/credit-note id, date, and `last_modified_time` currently believed
+cached. Every run:
+  - Lists every invoice (and, best-effort, every credit note -- see below)
+    dated in the window. This is cheap and unthrottled (pagination, no
+    rate limit), so it's always done in full; it's the per-document
+    *detail* fetch that's rate-limited and therefore worth skipping.
+  - Drops any cached entry whose `last_modified_time` no longer matches
+    what's listed now (edited or voided since the cache was written), or
+    that has fallen outside the window.
+  - Fetches detail only for documents that are new or were just dropped
+    for a changed `last_modified_time`.
+  - Aggregates quantities from the full (now up-to-date) cache, not just
+    this run's freshly-fetched documents -- so the output still covers the
+    whole window even though most of it came from the cache, not a fresh
+    fetch.
+This is the same pattern already proven in production by
+container_sellout_report.py's invoice sync, reused here rather than
+re-invented; see that script's module docstring for more detail on the
+`last_modified_time` diffing approach itself. It is NOT the same idea as
+the item `last_modified_time` approach the SOH report's README explicitly
+tried and rejected -- that was about inferring an *item's* stock-quantity
+change from the item's own last_modified_time (unconfirmed whether Zoho
+updates it for that), which is a different, unverified claim from "a
+document's last_modified_time changes when the document itself is edited",
+which Container Sellout's invoice cache already relies on successfully.
+
+Credit notes: Zoho Inventory's credit note endpoint/field names
+(`creditnotes`, `creditnote_id`) are inferred from Zoho's naming convention
+for the rest of this API family (matching `salesorders`/`purchaseorders`),
+not confirmed against a live response from this account, so the credit
+note sync is wrapped defensively -- if the endpoint doesn't exist or
+returns something unexpected, a warning is logged and the report proceeds
+on invoices alone rather than crashing. Net sales quantity (invoiced minus
+credited) is the intended definition for a "Sales by Item" report; this is
+a different question from whether Zoho's own FIFO stock accounting nets
+them off (it doesn't -- see container_sellout_report.py's docstring: a
+credit note there is booked as a new inward lot, so netting it off sales
+*there* would double-count the return).
 
 Assumptions worth verifying against the real Zoho UI report before trusting
 either automation (per the project's testing convention):
-  - "Sales by Item" == invoiced quantity (draft/void invoices excluded),
-    not booked sales-order quantity.
+  - "Sales by Item" == invoiced quantity net of credit notes (draft/void
+    documents excluded), not booked sales-order quantity.
   - Report covers all warehouses/locations combined, not a single store.
   - Weeks run Monday-Sunday; each week's column header is that week's ISO
     week-of-year number (e.g. "WK 36"), oldest week leftmost.
@@ -50,6 +99,8 @@ either automation (per the project's testing convention):
     SOH report's convention, further restricted to item_type == "inventory"
     to exclude non-sellable/non-stock catalog entries. An item missing the
     item_type field entirely is kept rather than dropped, to fail open.
+  - A credit note's quantity is netted off the week of the credit note's
+    own date, not the original invoice's date.
 
 Required environment variables:
     ZOHO_CLIENT_ID
@@ -69,6 +120,7 @@ module directly):
                                normal scheduled runs.
     RATE_LIMIT_PER_MINUTE   - max Zoho API requests/minute, defaults to 60
 """
+import csv
 import os
 import sys
 import threading
@@ -94,6 +146,16 @@ HEARTBEAT_SECONDS = 20
 RETRY_ATTEMPTS = 6
 DEFAULT_RATE_LIMIT_PER_MINUTE = 60
 MAX_RETRY_AFTER_SECONDS = 90
+CACHE_COLUMNS = ["doc_type", "doc_id", "doc_date", "last_modified_time", "item_id", "quantity"]
+
+# (doc_type, list path, list key, id field, detail key, sign). Sign is
+# applied to quantity when aggregating: invoices add, credit notes subtract.
+# Credit note field names are inferred from this API's naming convention
+# (salesorders/purchaseorders), not confirmed live -- see module docstring.
+DOCUMENT_TYPES = [
+    ("invoice", "invoices", "invoices", "invoice_id", "invoice", 1),
+    ("creditnote", "creditnotes", "creditnotes", "creditnote_id", "creditnote", -1),
+]
 
 
 def get_access_token():
@@ -396,15 +458,18 @@ def week_label(week_start):
     return f"WK {week_start.isocalendar()[1]}"
 
 
-def fetch_invoice_ids_in_window(session, api_domain, organization_id, window_start, window_end):
-    """Lists invoice IDs dated within [window_start, window_end], excluding
-    draft/void. Paginates newest-first and stops as soon as it walks past
-    window_start, so this stays cheap regardless of total invoice history."""
-    ids = []
+def list_documents_in_window(session, api_domain, organization_id, path, list_key, id_field, window_start, window_end):
+    """{doc_id: (date_iso, last_modified_time)} for non-draft, non-void
+    documents of one type (invoices or credit notes) dated within
+    [window_start, window_end]. Paginates newest-first and stops as soon as
+    it walks past window_start, so this stays cheap regardless of total
+    document history -- it's listing, not fetching detail, so it isn't
+    rate-limited."""
+    docs = {}
     page = 1
     while True:
         response = session.get(
-            f"{api_domain}/inventory/v1/invoices",
+            f"{api_domain}/inventory/v1/{path}",
             params={
                 "organization_id": organization_id,
                 "sort_column": "date",
@@ -416,53 +481,134 @@ def fetch_invoice_ids_in_window(session, api_domain, organization_id, window_sta
         )
         response.raise_for_status()
         payload = response.json()
-        invoices = payload.get("invoices", [])
+        documents = payload.get(list_key) or []
 
         reached_window_start = False
-        for invoice in invoices:
+        for doc in documents:
             try:
-                invoice_date = datetime.strptime(invoice["date"], "%Y-%m-%d").date()
+                doc_date = datetime.strptime(doc["date"], "%Y-%m-%d").date()
             except (KeyError, ValueError):
                 continue
-            if invoice_date > window_end:
+            if doc_date > window_end:
                 continue
-            if invoice_date < window_start:
+            if doc_date < window_start:
                 reached_window_start = True
                 break
-            if (invoice.get("status") or "").strip().lower() in EXCLUDED_INVOICE_STATUSES:
+            if (doc.get("status") or "").strip().lower() in EXCLUDED_INVOICE_STATUSES:
                 continue
-            ids.append(invoice["invoice_id"])
+            doc_id = doc.get(id_field)
+            if doc_id:
+                docs[str(doc_id)] = (doc_date.isoformat(), str(doc.get("last_modified_time") or ""))
 
         if reached_window_start or not payload.get("page_context", {}).get("has_more_page"):
             break
         page += 1
 
-    return ids
+    return docs
 
 
-def aggregate_sales(invoice_details, buckets):
-    """item_id -> list[len(buckets)] of quantity sold, one slot per bucket."""
-    sales = defaultdict(lambda: [0] * len(buckets))
-    for invoice in invoice_details:
-        if invoice is None:
+def load_doc_cache(path):
+    """{(doc_type, doc_id): {"date": iso str, "modified": str,
+    "lines": [(item_id, quantity), ...]}}, or {} if the cache doesn't exist
+    yet (first run)."""
+    cache = {}
+    if not os.path.exists(path):
+        return cache
+    with open(path, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            key = (row["doc_type"], row["doc_id"])
+            entry = cache.setdefault(key, {"date": row["doc_date"], "modified": row["last_modified_time"], "lines": []})
+            if row["item_id"]:
+                entry["lines"].append((row["item_id"], float(row["quantity"] or 0)))
+    return cache
+
+
+def save_doc_cache(path, cache):
+    """Sorted by date so a normal run's diff against the previous file is
+    small. Written via a temp file + rename so a run that dies mid-write
+    never leaves a half-written cache behind."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CACHE_COLUMNS)
+        for (doc_type, doc_id), entry in sorted(cache.items(), key=lambda kv: (kv[1]["date"], kv[0])):
+            lines = entry["lines"] or [("", 0)]  # placeholder so a document with no usable lines still counts as cached
+            for item_id, quantity in lines:
+                writer.writerow([doc_type, doc_id, entry["date"], entry["modified"], item_id, quantity])
+    os.replace(tmp, path)
+
+
+def document_lines(detail):
+    lines = []
+    for line in detail.get("line_items") or []:
+        item_id = line.get("item_id")
+        quantity = line.get("quantity") or 0
+        if item_id and quantity:
+            lines.append((str(item_id), quantity))
+    return lines
+
+
+def sync_documents_in_window(session, api_domain, organization_id, token_store, rate_limiter,
+                              cache, doc_type, path, list_key, id_field, detail_key, window_start, window_end):
+    """Brings `cache` entries of `doc_type` within [window_start, window_end]
+    up to date in place: lists the window (cheap), drops cached entries
+    that are gone/edited or have aged out of the window, and fetches detail
+    only for documents that are new or just dropped for a changed
+    last_modified_time. Mutates and returns `cache`."""
+    listed = list_documents_in_window(session, api_domain, organization_id, path, list_key, id_field, window_start, window_end)
+
+    for key in [k for k in cache if k[0] == doc_type]:
+        entry = cache[key]
+        entry_date = datetime.strptime(entry["date"], "%Y-%m-%d").date()
+        if not (window_start <= entry_date <= window_end):
+            del cache[key]
             continue
+        current = listed.get(key[1])
+        if current is None or current[1] != entry["modified"]:
+            del cache[key]
+
+    todo = [doc_id for doc_id in listed if (doc_type, doc_id) not in cache]
+    print(f"{path}: {len(listed)} in window, {len(todo)} to fetch ({len(listed) - len(todo)} cached)", flush=True)
+
+    def fetch_one(doc_id):
+        detail = fetch_detail(
+            session, api_domain, organization_id, token_store, rate_limiter,
+            url=f"{api_domain}/inventory/v1/{path}/{doc_id}",
+            result_key=detail_key,
+            label=f"{detail_key} {doc_id}",
+        )
+        return None if detail is None else (doc_id, detail)
+
+    for doc_id, detail in fetch_concurrently(todo, fetch_one, f"{detail_key} detail"):
+        doc_date, modified = listed[doc_id]
+        cache[(doc_type, doc_id)] = {"date": doc_date, "modified": modified, "lines": document_lines(detail)}
+
+    return cache
+
+
+def aggregate_net_sales(cache, buckets):
+    """item_id -> list[len(buckets)] of net quantity sold (invoices minus
+    credit notes), one slot per bucket, from a cache already restricted to
+    the current window."""
+    sign_by_doc_type = {doc_type: sign for doc_type, *_rest, sign in DOCUMENT_TYPES}
+    sales = defaultdict(lambda: [0] * len(buckets))
+    for (doc_type, _doc_id), entry in cache.items():
         try:
-            invoice_date = datetime.strptime(invoice["date"], "%Y-%m-%d").date()
+            doc_date = datetime.strptime(entry["date"], "%Y-%m-%d").date()
         except (KeyError, ValueError):
             continue
 
         bucket_idx = next(
-            (idx for idx, (start, end) in enumerate(buckets) if start <= invoice_date <= end),
+            (idx for idx, (start, end) in enumerate(buckets) if start <= doc_date <= end),
             None,
         )
         if bucket_idx is None:
             continue
 
-        for line in invoice.get("line_items") or []:
-            item_id = line.get("item_id")
-            if not item_id:
-                continue
-            sales[item_id][bucket_idx] += line.get("quantity") or 0
+        sign = sign_by_doc_type.get(doc_type, 1)
+        for item_id, quantity in entry["lines"]:
+            sales[item_id][bucket_idx] += sign * quantity
 
     return sales
 
@@ -526,9 +672,13 @@ def write_excel(rows, week_columns, output_path):
     workbook.save(output_path)
 
 
-def run_report(rate_limit_per_minute, buckets, output_path):
-    """Shared end-to-end flow: auth, catalog fetch, invoice fetch/aggregate,
-    write. `buckets` is whatever compute_week_buckets_ending_by returned."""
+def run_report(rate_limit_per_minute, buckets, output_path, cache_path):
+    """Shared end-to-end flow: auth, catalog fetch, incremental invoice/
+    credit-note sync against `cache_path`, aggregate, write. `buckets` is
+    whatever compute_week_buckets_ending_by returned. The cache file is
+    saved after each document type syncs (not just at the end), so a run
+    that fails partway through still keeps whatever it already fetched for
+    next time."""
     window_start, window_end = buckets[0][0], buckets[-1][1]
     week_columns = [week_label(start) for start, _ in buckets]
 
@@ -549,20 +699,26 @@ def run_report(rate_limit_per_minute, buckets, output_path):
 
     catalog = build_item_catalog(session, api_domain, organization_id, token_store, rate_limiter)
 
-    invoice_ids = fetch_invoice_ids_in_window(session, api_domain, organization_id, window_start, window_end)
-    print(f"Found {len(invoice_ids)} invoice(s) in window; fetching line item detail...", flush=True)
+    cache = load_doc_cache(cache_path)
+    for doc_type, path, list_key, id_field, detail_key, _sign in DOCUMENT_TYPES:
+        try:
+            sync_documents_in_window(
+                session, api_domain, organization_id, token_store, rate_limiter,
+                cache, doc_type, path, list_key, id_field, detail_key, window_start, window_end,
+            )
+        except requests.exceptions.HTTPError as exc:
+            if doc_type == "invoice":
+                raise
+            print(
+                f"Warning: could not sync {path} ({exc}); its field/endpoint names are inferred, not "
+                "confirmed live -- proceeding without netting off credit notes this run.",
+                file=sys.stderr, flush=True,
+            )
+            continue
+        finally:
+            save_doc_cache(cache_path, cache)
 
-    def fetch_one_invoice(invoice_id):
-        return fetch_detail(
-            session, api_domain, organization_id, token_store, rate_limiter,
-            url=f"{api_domain}/inventory/v1/invoices/{invoice_id}",
-            result_key="invoice",
-            label=f"invoice {invoice_id}",
-        )
-
-    invoice_details = fetch_concurrently(invoice_ids, fetch_one_invoice, "invoice detail")
-
-    sales = aggregate_sales(invoice_details, buckets)
+    sales = aggregate_net_sales(cache, buckets)
     rows = build_rows(catalog, sales, buckets)
 
     write_excel(rows, week_columns, output_path)

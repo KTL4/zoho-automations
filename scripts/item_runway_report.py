@@ -6,16 +6,21 @@ date range "Previous week", compared with "Previous periods", 14 periods)
 and writes it to an Excel file named Sales_by_item(<mon>).xlsx.
 
 Run on the 1st of each month by .github/workflows/item-runway-report.yml.
-Shares its core logic (auth, rate limiting, catalog fetch, invoice fetch,
-aggregation, filtering, Excel formatting) with item_runway_weekly_report.py
-via sales_by_item_common.py -- see that module's docstring for the full
-picture (why there's no direct report API, what gets filtered and why, and
-which assumptions still need verifying against the real Zoho UI report).
+Shares its core logic (auth, rate limiting, catalog fetch, incremental
+invoice/credit-note caching, aggregation, filtering, Excel formatting) with
+item_runway_weekly_report.py via sales_by_item_common.py -- see that
+module's docstring for the full picture (why there's no direct report API,
+how the cache keeps steady-state runs cheap, what gets filtered and why,
+and which assumptions still need verifying against the real Zoho UI
+report).
 
 This script's own responsibility is just: a 14-period window anchored on
 the last full week before "today" (i.e. the same "Previous week" Zoho's UI
-would show if run today), and a Sales_by_item(<mon>).xlsx filename named
-for the month that window's most recent week falls in.
+would show if run today), a Sales_by_item(<mon>).xlsx filename named for
+the month that window's most recent week falls in, and its own cache file
+(data/item_runway_cache_monthly.csv, separate from the weekly report's, so
+the two independently-scheduled workflows never write to the same file in
+the same run).
 
 Required/optional environment variables: see sales_by_item_common.py.
 """
@@ -45,7 +50,7 @@ def main():
     output_path = f"reports/Sales_by_item({output_month}).xlsx"
 
     rate_limit_per_minute = int(os.environ.get("RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE))
-    run_report(rate_limit_per_minute, buckets, output_path)
+    run_report(rate_limit_per_minute, buckets, output_path, "data/item_runway_cache_monthly.csv")
 
 
 if __name__ == "__main__":
