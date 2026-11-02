@@ -73,7 +73,8 @@ Optional environment variables:
     RATE_LIMIT_PER_MINUTE              - defaults to 60
     MAX_API_CALLS                      - stop the run before making more than
                                          this many Zoho API requests (retries
-                                         count); blank or 0 = no limit
+                                         count); blank or 0 = no limit. Never
+                                         applied to a full refresh run.
     LOTS_REFRESH_DAYS                  - incremental runs re-pull only lots
                                          dated within this many days, default 365
     SALES_RECHECK_DAYS                 - incremental runs re-list only invoices
@@ -813,6 +814,11 @@ def run(budget):
     state = load_state(organization_id)
     cached_lots = load_lots(organization_id)
     full, why = plan_refresh(state, as_of, bool(cached_lots))
+    if full and budget.limit:
+        # The monthly full refresh needs ~1,100 calls; the limit is a guard
+        # for normal runs only (owner's rule, 2026-11-02).
+        print(f"Full refresh: the {budget.limit}-call limit does not apply to this run", flush=True)
+        budget.limit = 0
     if full:
         pull_from = lots_from
     else:
