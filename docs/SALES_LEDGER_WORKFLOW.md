@@ -3,6 +3,16 @@
 Keeps `reports/Sales_13.xlsx` up to date. The file has one row per invoice or
 credit note line, for every sale since December 2019.
 
+It replaces the Item Runway reports (paused and disabled on 4 Nov 2026).
+Everything that used to read sales from those reports now gets it from this one weekly run:
+
+| Delivery | Built by | Used by |
+|---|---|---|
+| `reports/Sales_13.xlsx` (all sales lines) | `scripts/sales_ledger.py` | Sent to the Claude chat every Saturday |
+| `reports/ITEM_LISTING_FEED.xlsx` | `scripts/item_listing_feed.py` | ITEM LISTING Claude project, linked from GitHub |
+| ITEM LISTING dashboard data (5 CSVs) | `scripts/item_listing_feed.py --dashboard` | Shared dashboard https://claude.ai/artifact/URfF2YHvcEvdyTTcKLkUS3, refreshed in place |
+| `reports/Sales_by_item(WKx-WKy).xlsx` (weekly units) | `scripts/weekly_units_report.py` | Monday Stock Health run, which updates the Stock Health Dashboard |
+
 ## What it does
 
 | | |
@@ -80,8 +90,24 @@ Checked against the last old report, `Sales_by_item(WK9-WK44).xlsx`:
      document's details (1 call each) and replaces all of its rows.
    - **Voided or deleted** (no longer listed): removes its rows.
    - **Unchanged:** does nothing.
-3. **Save.** Rewrites the yearly CSVs and `reports/Sales_13.xlsx`, then commits
-   both to `main`.
+3. **Save.** Rewrites the yearly CSVs and `reports/Sales_13.xlsx`.
+4. **Feeds.** Writes `reports/ITEM_LISTING_FEED.xlsx` and the weekly units file from the updated ledger, then commits
+   everything to `main`.
+
+## Saturday delivery and dashboard refresh
+
+A Claude Code scheduled task, "Weekly Sales file delivery", runs at 23:07 EAT on Saturdays in the same Claude chat.
+1. **Start or follow the run.**
+   - If GitHub has started the 23:00 run, the task follows it. GitHub's timer can run late.
+   - If GitHub hasn't started it, the task starts the run itself, with a 1,000-call cap.
+   - If the run fails or stops at the cap, the task reports it and does not re-run.
+2. **Send the Sales file.** It sends `Sales_13.xlsx` to the chat with:
+   - row count
+   - the week's net sales and month-to-date net sales
+   - API calls used
+   - any `Check:` warning
+3. **Refresh the ITEM LISTING dashboard.** It rebuilds the dashboard's five CSVs, uploads them, points the
+   dashboard's data at them and deletes the old copies. The link and the page stay the same.
 
 **Safety checks:**
 - If Zoho suddenly lists fewer than 90% of the invoices the ledger holds, the run stops and changes nothing.
@@ -127,3 +153,11 @@ state file under `frozen_invoice_ids`, so they are never fetched twice.
   - **Result:** October came to 691.9m, VAT incl., net of 128.4m in credit notes. That matches the team's own figure.
   - **Problem:** 40 discounted invoices came out too high. Line totals subtracted Zoho's `discount_amount`, but on a VAT-inclusive invoice that amount is sometimes the ex-VAT share.
   - **Fix:** a percentage discount is now applied to the VAT-inclusive rate. The 245 documents are marked to be fetched again on the next run.
+- **2026-11-04, run 3** (manual, 356 calls): re-fetched the 245 documents with the fixed formula.
+  - **Result:** October invoices came to 820,118,327, matching Zoho's export. Net was 691,747,748.
+  - **Remaining warnings:** 2. INV-016789 and CN-02054 are a matching pair, each off by 6,069.34.
+- **2026-11-04, later the same day:**
+  - **Shipping:** shipping charges and round-off were added as their own rows, so October is 691,779,748, the same as
+    Zoho's Sales by Salesperson.
+  - **ITEM LISTING brands:** grouped as AIWIBI / AIWINA / UBL / OTHERS.
+  - **Weekly units file:** added for Stock Health.

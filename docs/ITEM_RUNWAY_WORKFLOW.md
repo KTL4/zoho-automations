@@ -1,5 +1,17 @@
 # Item Runway Reports — End-to-End Workflow
 
+> **Retired 4 Nov 2026.** Both reports are paused: the schedules are commented out, and the weekly workflow is also
+> disabled in GitHub Actions. Their Claude Code delivery tasks are deleted.
+>
+> | Was used for | Now comes from |
+> |---|---|
+> | Weekly units file `Sales_by_item(WKx-WKy).xlsx` for the Stock Health run | `scripts/weekly_units_report.py`, part of the Saturday Sales Ledger run. Same file name and layout. |
+> | Sales data for item listing and ranking | `Sales_13.xlsx` and `ITEM_LISTING_FEED.xlsx` |
+>
+> See `docs/SALES_LEDGER_WORKFLOW.md`. Manual runs still work from the Actions tab if ever needed.
+> One known fault if they are revived: the credit-note listing used a login token that had already expired, so credit
+> notes were never subtracted.
+
 Two schedules of the same underlying report ("Sales by Item"), both built
 on the same incremental invoice/credit-note cache.
 
