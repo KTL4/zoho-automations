@@ -27,6 +27,26 @@ class LineTotalTests(unittest.TestCase):
     def test_percentage_discount_when_no_amount(self):
         self.assertAlmostEqual(L.line_total({"rate": 100, "quantity": 2, "discount": "10%"}), 180)
 
+    def test_percent_discount_with_ex_vat_amount(self):
+        # INV-017807, first live run: 10% off 138 x 40,000 incl. VAT; Zoho's
+        # discount_amount (467,796.61) is 10% of the ex-VAT value.
+        line = {"rate": 40000, "quantity": 138, "discount": 10, "discount_amount": 467796.61,
+                "tax_percentage": 18}
+        self.assertAlmostEqual(L.line_total(line), 4968000, places=2)
+
+    def test_percent_discount_with_incl_vat_amount(self):
+        # INV-017002: 5% off 123,024 incl. VAT, discount_amount 6,151.20.
+        line = {"rate": 10252, "quantity": 12, "discount": 5, "discount_amount": 6151.2, "tax_percentage": 18}
+        self.assertAlmostEqual(L.line_total(line), 116872.8, places=2)
+
+    def test_fully_discounted_promo_line_is_zero(self):
+        line = {"rate": 1195, "quantity": 2, "discount": 100, "discount_amount": 2025.42, "tax_percentage": 18}
+        self.assertAlmostEqual(L.line_total(line), 0)
+
+    def test_tax_exclusive_invoice_adds_vat(self):
+        line = {"rate": 100, "quantity": 1, "discount_amount": 0, "tax_percentage": 18}
+        self.assertAlmostEqual(L.line_total(line, inclusive=False), 118)
+
 
 class PlanSyncTests(unittest.TestCase):
     def test_new_changed_removed_and_unchanged(self):

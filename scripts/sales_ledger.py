@@ -29,8 +29,7 @@ Excel had rounded the rest); those rows are kept exactly as exported
 to are listed in the state file as `frozen_invoice_ids` so the sync never
 fetches them a second time.
 
-Line Total = rate x quantity - line discount, i.e. VAT-inclusive after
-discount. Checked against all 188 lines for 21 Sep 2026 in the old export
+Line Total = VAT-inclusive value after the line discount (see line_total). Checked against all 188 lines for 21 Sep 2026 in the old export
 (Zoho's "Item Total" column is the ex-VAT amount and was NOT what the file
 used). Each fetched invoice's line totals are also checked against the
 invoice total Zoho lists; mismatches are reported in the log.
@@ -219,15 +218,49 @@ def write_xlsx(rows, output_path):
 
 # ------------------------------------------------------------------ line building
 
-def line_total(line):
-    """VAT-inclusive line value after the line discount: rate x qty - discount."""
-    gross = to_number(line.get("rate")) * to_number(line.get("quantity"))
-    if line.get("discount_amount") not in (None, ""):
-        return gross - to_number(line.get("discount_amount"))
+def discount_percent(line, gross):
+    """The line discount as a percentage, or None if it was entered as an
+    amount. Zoho returns a percentage either as "10%" or as a bare 10 next to
+    a `discount_amount`; on a VAT-inclusive invoice that amount is sometimes
+    the share of the ex-VAT value (e.g. INV-017807: 10% of 5,520,000 incl.
+    VAT came back as 467,796.61) and sometimes of the incl.-VAT value
+    (INV-017002), so a bare number counts as a percentage when the amount
+    matches it on either basis."""
     discount = line.get("discount")
     if isinstance(discount, str) and discount.strip().endswith("%"):
-        return gross * (1 - to_number(discount.strip()[:-1]) / 100)
-    return gross - to_number(discount)
+        return to_number(discount.strip()[:-1])
+    pct = to_number(discount)
+    amount = line.get("discount_amount")
+    if not (0 < pct <= 100) or amount in (None, ""):
+        return None
+    amount = to_number(amount)
+    tax = to_number(line.get("tax_percentage")) / 100
+    for base in (gross, gross / (1 + tax)):
+        if abs(base * pct / 100 - amount) <= max(1.0, 0.005 * amount):
+            return pct
+    return None
+
+
+def line_total(line, inclusive=True):
+    """VAT-inclusive line value after the line discount.
+
+    The rate is VAT-inclusive on an inclusive invoice (all KTL invoices so
+    far), so a percentage discount is simply gross x (1 - pct). Checked
+    against all 9,906 lines of Zoho's 21 Sep - 1 Nov export, where it equals
+    Zoho's Item Total + Item Tax Amount on every line. Subtracting
+    `discount_amount` instead overstated 40 invoices in the first live run
+    (2026-11-04), because that amount is sometimes ex-VAT."""
+    gross = to_number(line.get("rate")) * to_number(line.get("quantity"))
+    pct = discount_percent(line, gross)
+    if pct is not None:
+        net = gross * (1 - pct / 100)
+    elif line.get("discount_amount") not in (None, ""):
+        net = gross - to_number(line.get("discount_amount"))
+    else:
+        net = gross - to_number(line.get("discount"))
+    if not inclusive:
+        net *= 1 + to_number(line.get("tax_percentage")) / 100
+    return net
 
 
 def entity_discount(detail):
@@ -267,7 +300,8 @@ class Lookups:
 
 def document_rows(doc_type, doc_id, modified, detail, sign, lookups):
     lines = [l for l in detail.get("line_items") or [] if to_number(l.get("quantity"))]
-    totals = [line_total(l) for l in lines]
+    inclusive = str(detail.get("is_inclusive_tax", True)).lower() != "false"
+    totals = [line_total(l, inclusive) for l in lines]
     discount = entity_discount(detail)
     gross = sum(totals)
     if discount and gross:
