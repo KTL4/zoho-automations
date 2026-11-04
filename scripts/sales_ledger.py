@@ -159,8 +159,12 @@ def load_overrides(path):
 
 def xlsx_invoice_id(row):
     """History rows keep the value exactly as the old export had it (a
-    rounded number, or blank for credit notes); synced rows carry Zoho's
-    full id as text so no digits are lost."""
+    rounded number, or blank for credit notes); synced invoices carry
+    Zoho's full id as text so no digits are lost. Credit notes are always
+    blank, as in the old export: the team's reports treat a blank Invoice ID
+    with a negative Total as a credit note."""
+    if row["doc_type"] == "creditnote":
+        return None
     value = row["invoice_id"]
     if row["doc_type"] == "history" and value:
         try:
