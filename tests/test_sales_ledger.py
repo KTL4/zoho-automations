@@ -134,6 +134,13 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(values[2][8], -10)
             self.assertIsInstance(values[3][0], float)  # history: rounded number as before
 
+    def test_credit_note_invoice_id_is_blank_in_xlsx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            xlsx = os.path.join(tmp, "out.xlsx")
+            L.write_xlsx([row(doc_type="creditnote", doc_id="cn9", total="-5.00", qty="-1")], xlsx)
+            values = list(load_workbook(xlsx).active.iter_rows(values_only=True))
+            self.assertIsNone(values[1][0])
+
 
 if __name__ == "__main__":
     unittest.main()

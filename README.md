@@ -248,4 +248,6 @@ negative rows) and corrects any earlier invoice that was edited, voided or
 deleted in Zoho, by comparing each document's `last_modified_time` with the
 master copy in `data/sales_ledger_<org>/<year>.csv`. The xlsx is overwritten
 in place each week. ~400 Zoho API calls a week (scheduled runs capped at
-1,000). Full walkthrough: `docs/SALES_LEDGER_WORKFLOW.md`.
+1,000). Each run also writes `reports/ITEM_LISTING_FEED.xlsx`, a ~3.5 MB
+feed for the ITEM LISTING Claude project (`scripts/item_listing_feed.py`).
+Full walkthrough: `docs/SALES_LEDGER_WORKFLOW.md`.

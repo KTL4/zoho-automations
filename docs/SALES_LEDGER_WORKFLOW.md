@@ -17,7 +17,30 @@ Columns: Invoice ID, Date, Sales Person Name, Customer Name, SKU, Item Name,
 Brand, Category, Total, Quantity.
 
 - **Total** includes VAT and is after line discounts (for a percentage discount, rate × quantity × (1 − discount %)). This matches the old export and Zoho's own Item Total + Item Tax on every line of the 21 Sep – 1 Nov export.
-- **Credit notes** are their own rows on the credit note's date, with negative Total and Quantity.
+- **Credit notes** are their own rows on the credit note's date, with negative Total and Quantity and a blank Invoice ID (as in the old export).
+
+## ITEM LISTING feed
+
+The full `Sales_13.xlsx` is too big to link to a Claude project. Each run therefore also
+writes `reports/ITEM_LISTING_FEED.xlsx` (about 3.5 MB) with `scripts/item_listing_feed.py`.
+It holds only what the ITEM LISTING dashboard needs, as Excel tables:
+
+| Sheet | What it holds |
+|---|---|
+| **Sales** | Daily customer × SKU quantity and total, from 1 Jul of last year |
+| **Orders** | One row per order, from 1 Jan of last year. Value is split by brand. Credit notes are one row per customer per day, with no order number. |
+| **Customers** | Assigned BDM; first bought, first paid (overall and per brand) and last paid, all from the full history |
+| **Items** | SKU, Item Name, Brand, Category |
+| **Listings** | Every customer–SKU pair since Dec 2019, with listing date, last bought and whether it counts as a new listing |
+
+The rules are the project's own:
+- **Brands:** AIWIBI, AIWINA and UBL only.
+- **Order:** Invoice ID + Customer + Date.
+- **BDM:** the active BDM on the customer's most recent sale, else Unassigned.
+- **Listing:** the first paid purchase of a customer–SKU pair, on a day after the customer's first paid purchase day.
+  Carrefour X-SKUs first bought in January don't count.
+
+Start dates before 1 Jan of the current year are not covered by Sales detail.
 
 ## Each run
 

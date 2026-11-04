@@ -46,11 +46,16 @@ jobs:
           MAX_API_CALLS: ${{ github.event_name == 'schedule' && '1000' || inputs.max_api_calls }}
         run: python -u scripts/sales_ledger.py
 
+      # Compact feed for the ITEM LISTING Claude project (the full
+      # Sales_13.xlsx is too big to link to a project).
+      - name: Build ITEM LISTING feed
+        run: python -u scripts/item_listing_feed.py
+
       - name: Commit ledger and Sales file to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add reports/Sales_13.xlsx data/sales_ledger_*
+          git add reports/Sales_13.xlsx reports/ITEM_LISTING_FEED.xlsx data/sales_ledger_*
           if ! git diff --staged --quiet; then
             git commit -m "Update Sales ledger for $(TZ=Africa/Nairobi date +%F)"
             git pull --rebase origin main
