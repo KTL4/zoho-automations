@@ -51,6 +51,26 @@ CSV files: sales_lines, customers, items, listings and invoices.
 - **Refresh:** the Saturday delivery task uploads them to the artifact and points its data sources at the new
   files. The link stays the same.
 
+## Weekly units file (Stock Health Dashboard)
+
+The weekly stock-health run, done in its own Claude project every Monday, reads
+`reports/Sales_by_item(WKx-WKy).xlsx`.
+- **Before:** the Item Runway weekly report made that file. That report has been retired.
+- **Now:** each Saturday run writes it with `scripts/weekly_units_report.py`, built from the ledger (no Zoho calls).
+
+What the file contains:
+- **Layout:** the same as before. SKU, Item Name, Brand, then 36 Monday–Sunday week columns (`WK <ISO week>`).
+- **Units:** units invoiced per SKU, with credit notes not subtracted. This is the old report's actual basis, and the
+  "same basis as the archive" the stock-health method expects.
+- **SKUs:** every SKU that sold in the window, except shipping, delivery and adjustment lines.
+- **Item Name and Brand:** from the latest SOH report, falling back to the ledger.
+- **Newest week:** the week ending the Sunday after the run, so it is missing that Sunday. The whole file is rebuilt
+  each week, so Sunday and late invoices land the following Saturday.
+
+Checked against the last old report, `Sales_by_item(WK9-WK44).xlsx`:
+- **Rows:** 870 of its 874 SKU rows are identical. The other 4 have invoices edited in Zoho since.
+- **Added:** 3 older SKUs it had filtered out as inactive (`AWB84-01 Papaya`, `AWB80-05 Bamboo`, `AWB02-02`).
+
 ## Each run
 
 1. **List.** Lists every invoice in Zoho (all history, ~90 calls) and every
