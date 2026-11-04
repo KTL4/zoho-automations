@@ -325,18 +325,34 @@ def document_rows(doc_type, doc_id, modified, detail, sign, lookups):
                      "category": lookups.category(sku, item_id),
                      "total": f"{sign * total:.2f}",
                      "quantity": f"{sign * to_number(line.get('quantity')):g}"})
+    for sku, name, amount in charge_lines(detail):
+        rows.append({**base, "sku": sku, "item_name": name, "brand": "", "category": "",
+                     "total": f"{sign * amount:.2f}", "quantity": "0"})
     if not rows:  # keep a placeholder so the document counts as synced
         rows.append({**base, "sku": "", "item_name": "", "brand": "", "category": "",
                      "total": "", "quantity": ""})
     return rows
 
 
+def charge_lines(detail):
+    """Document-level amounts that aren't item lines but are part of Zoho's
+    sales figures: shipping, and adjustment + round-off. Zoho's Sales by
+    Salesperson for Oct 2026 (691,779,748) is exactly the item lines plus
+    32,000 of shipping on five invoices."""
+    out = []
+    shipping = to_number(detail.get("shipping_charge"))
+    if shipping:
+        out.append(("SHIPPING CHARGES", "Shipping Charges", shipping))
+    adjustment = to_number(detail.get("adjustment")) + to_number(detail.get("roundoff_value"))
+    if adjustment:
+        out.append(("ADJUSTMENT", "Invoice adjustment", adjustment))
+    return out
+
+
 def check_document_total(detail, rows):
-    """Difference between Zoho's document total and what the rows add up to
-    (plus shipping/adjustment/round-off, which aren't item lines)."""
+    """Difference between Zoho's document total and what the rows add up to."""
     expected = to_number(detail.get("total"))
-    extras = sum(to_number(detail.get(k)) for k in ("shipping_charge", "adjustment", "roundoff_value"))
-    got = sum(abs(to_number(r["total"])) for r in rows) + extras
+    got = abs(sum(to_number(r["total"]) for r in rows))
     return expected - got
 
 

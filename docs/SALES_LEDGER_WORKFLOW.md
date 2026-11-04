@@ -17,6 +17,7 @@ Columns: Invoice ID, Date, Sales Person Name, Customer Name, SKU, Item Name,
 Brand, Category, Total, Quantity.
 
 - **Total** includes VAT and is after line discounts (for a percentage discount, rate × quantity × (1 − discount %)). This matches the old export and Zoho's own Item Total + Item Tax on every line of the 21 Sep – 1 Nov export.
+- **Shipping and adjustments** (including round-off) are their own rows (SKU `SHIPPING CHARGES` / `ADJUSTMENT`, quantity 0, no brand), so totals match Zoho's Sales by Salesperson: October 2026 = 691,779,748 in both.
 - **Credit notes** are their own rows on the credit note's date, with negative Total and Quantity and a blank Invoice ID (as in the old export).
 
 ## ITEM LISTING feed
@@ -41,6 +42,14 @@ The rules are the project's own:
   Carrefour X-SKUs first bought in January don't count.
 
 Start dates before 1 Jan of the current year are not covered by Sales detail.
+
+### Shared ITEM LISTING dashboard
+
+The team's dashboard artifact (https://claude.ai/artifact/URfF2YHvcEvdyTTcKLkUS3) reads five
+CSV files: sales_lines, customers, items, listings and invoices.
+- **Build:** `python scripts/item_listing_feed.py --dashboard <dir>` writes them from the ledger.
+- **Refresh:** the Saturday delivery task uploads them to the artifact and points its data sources at the new
+  files. The link stays the same.
 
 ## Each run
 

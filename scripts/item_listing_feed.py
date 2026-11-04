@@ -31,6 +31,7 @@ quiet" look-back), which keeps the file small enough for a project; everything
 that needs the full history (first purchases, listing dates, BDM) is worked
 out here from the whole ledger and stored on Customers / Listings.
 """
+import csv
 import os
 import sys
 from collections import defaultdict
@@ -170,6 +171,62 @@ def write(path, info, sheets):
     os.replace(tmp, path)
 
 
+def write_dashboard_csvs(lines, out_dir):
+    """The five files behind the shared ITEM LISTING dashboard artifact
+    (claude.ai/artifact/URfF2YHvcEvdyTTcKLkUS3), in the columns its page
+    reads: sales_lines (date, inv, cid, sid, total, qty; inv -1 for credit
+    notes), customers (cid, customer, bdm, first_purchase), items (sid, sku,
+    item_name, brand, category), listings (cid, sid, listed_on: only pairs
+    that count as new listings) and invoices (inv, invoice_id). Full history,
+    focus brands only. Returns {name: path}."""
+    customers = sorted({l["customer"] for l in lines})
+    cid = {c: i for i, c in enumerate(customers)}
+    items_meta = {}
+    for l in lines:
+        items_meta[l["sku"]] = (l["item"], l["brand"], l["category"])
+    skus = sorted(items_meta)
+    sid = {s: i for i, s in enumerate(skus)}
+    first_paid, bdm, pair_first = {}, {}, {}
+    for l in lines:
+        if not l["credit"] and l["salesperson"] in ACTIVE_BDMS:
+            bdm[l["customer"]] = l["salesperson"]
+        if l["total"] > 0:
+            first_paid.setdefault(l["customer"], l["date"])
+            pair_first.setdefault((l["customer"], l["sku"]), l["date"])
+    orders, sales = {}, []
+    for l in lines:
+        inv = -1
+        if not l["credit"]:
+            inv = orders.setdefault((l["invoice"], l["customer"], l["date"]), len(orders))
+        sales.append((l["date"], inv, cid[l["customer"]], sid[l["sku"]], round(l["total"], 2), l["qty"]))
+    listings = []
+    for (c, sku), d in pair_first.items():
+        if d <= first_paid[c]:
+            continue
+        if c.upper().startswith(CARREFOUR_PREFIX) and sku.upper().startswith("X") and d[5:7] == "01":
+            continue
+        listings.append((cid[c], sid[sku], d))
+    listings.sort()
+    tables = {
+        "sales_lines": (["date", "inv", "cid", "sid", "total", "qty"], sales),
+        "customers": (["cid", "customer", "bdm", "first_purchase"],
+                      [(cid[c], c, bdm.get(c, "UNASSIGNED"), first_paid.get(c, "")) for c in customers]),
+        "items": (["sid", "sku", "item_name", "brand", "category"], [(sid[s], s, *items_meta[s]) for s in skus]),
+        "listings": (["cid", "sid", "listed_on"], listings),
+        "invoices": (["inv", "invoice_id"], [(n, k[0]) for k, n in sorted(orders.items(), key=lambda kv: kv[1])]),
+    }
+    os.makedirs(out_dir, exist_ok=True)
+    paths = {}
+    for name, (header, rows) in tables.items():
+        path = os.path.join(out_dir, f"{name}.csv")
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            writer.writerows([clean(v) for v in r] for r in rows)
+        paths[name] = path
+    return paths
+
+
 def main(org=None, output_path=OUTPUT_PATH, today=None):
     org = org or os.environ.get("ZOHO_ORGANIZATION_ID") or "780891784"
     lines = prepare(ledger.load_ledger(ledger.ledger_path(org)))
@@ -202,4 +259,10 @@ def main(org=None, output_path=OUTPUT_PATH, today=None):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:2])
+    if len(sys.argv) > 2 and sys.argv[1] == "--dashboard":
+        # python scripts/item_listing_feed.py --dashboard <out_dir>
+        org = os.environ.get("ZOHO_ORGANIZATION_ID") or "780891784"
+        for name, path in write_dashboard_csvs(prepare(ledger.load_ledger(ledger.ledger_path(org))), sys.argv[2]).items():
+            print(name, path, os.path.getsize(path))
+    else:
+        main(*sys.argv[1:2])
