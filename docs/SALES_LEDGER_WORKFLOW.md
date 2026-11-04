@@ -16,7 +16,7 @@ credit note line, for every sale since December 2019.
 Columns: Invoice ID, Date, Sales Person Name, Customer Name, SKU, Item Name,
 Brand, Category, Total, Quantity.
 
-- **Total** includes VAT and is after line discounts (rate × quantity − discount). This matches the old export.
+- **Total** includes VAT and is after line discounts (for a percentage discount, rate × quantity × (1 − discount %)). This matches the old export and Zoho's own Item Total + Item Tax on every line of the 21 Sep – 1 Nov export.
 - **Credit notes** are their own rows on the credit note's date, with negative Total and Quantity.
 
 ## Each run
@@ -68,3 +68,10 @@ state file under `frozen_invoice_ids`, so they are never fetched twice.
   Runway report's 401 on it was an expired login token, not a wrong endpoint.
 - **No `Check:` warnings:** they would mean the line-total formula needs adjusting.
 - **Spot-check:** compare one new invoice and one credit note against Zoho.
+
+## Live run history
+
+- **2026-11-04, run 1** (manual, 348 calls): listed 18,039 invoices and 140 credit notes and fetched 245 documents.
+  - **Result:** October came to 691.9m, VAT incl., net of 128.4m in credit notes. That matches the team's own figure.
+  - **Problem:** 40 discounted invoices came out too high. Line totals subtracted Zoho's `discount_amount`, but on a VAT-inclusive invoice that amount is sometimes the ex-VAT share.
+  - **Fix:** a percentage discount is now applied to the VAT-inclusive rate. The 245 documents are marked to be fetched again on the next run.
