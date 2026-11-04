@@ -237,3 +237,15 @@ taken from the inventory-workflows toolkit's `pull_fifo_lots.ps1`, not yet
 from a run in this repo. On the first run, check the log's lot-type
 summary, and tie one container's Units In to its bill and its Units On
 Hand to the stock in Zoho.
+
+## Sales Ledger (weekly)
+
+`scripts/sales_ledger.py`, run at 23:00 East Africa Time every Saturday by
+`.github/workflows/sales-ledger-weekly.yml` (also runnable on demand). Keeps
+`reports/Sales_13.xlsx` — one row per invoice / credit note line since Dec
+2019 — current: adds the week's invoices and credit notes (credit notes as
+negative rows) and corrects any earlier invoice that was edited, voided or
+deleted in Zoho, by comparing each document's `last_modified_time` with the
+master copy in `data/sales_ledger_<org>/<year>.csv`. The xlsx is overwritten
+in place each week. ~400 Zoho API calls a week (scheduled runs capped at
+1,000). Full walkthrough: `docs/SALES_LEDGER_WORKFLOW.md`.
