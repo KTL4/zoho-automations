@@ -1,9 +1,11 @@
 name: Item Runway Report
 
 on:
-  schedule:
-    # 03:00 UTC on the 1st of each month = 06:00 East Africa Time
-    - cron: "0 3 1 * *"
+  # Paused 2026-11-04 at the user's request. Uncomment the schedule block
+  # below to resume automatic monthly runs. workflow_dispatch (manual runs)
+  # still works while paused.
+  # schedule:
+  #   - cron: "0 3 1 * *"  # 03:00 UTC on the 1st of each month = 06:00 East Africa Time
   workflow_dispatch:
     inputs:
       as_of_date:
