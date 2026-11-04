@@ -92,10 +92,18 @@ class DocumentRowsTests(unittest.TestCase):
         self.assertEqual(self.lookups.category("NEW", "i2"), "BABY CARE")
         self.assertEqual(self.lookups.category("NEW", "unknown"), "")
 
-    def test_document_total_check(self):
+    def test_shipping_becomes_its_own_row_and_total_checks(self):
         detail = {"total": 1100, "shipping_charge": 100, "line_items": [
             {"sku": "A1", "rate": 500, "quantity": 2, "discount_amount": 0}]}
         out = L.document_rows("invoice", "1", "m", detail, 1, self.lookups)
+        self.assertEqual([(r["sku"], r["total"], r["quantity"]) for r in out],
+                         [("A1", "1000.00", "2"), ("SHIPPING CHARGES", "100.00", "0")])
+        self.assertAlmostEqual(L.check_document_total(detail, out), 0)
+
+    def test_credit_note_adjustment_is_negative(self):
+        detail = {"total": 95, "adjustment": -5, "line_items": [{"sku": "A1", "rate": 100, "quantity": 1}]}
+        out = L.document_rows("creditnote", "c", "m", detail, -1, self.lookups)
+        self.assertEqual([r["total"] for r in out], ["-100.00", "5.00"])
         self.assertAlmostEqual(L.check_document_total(detail, out), 0)
 
     def test_document_without_lines_keeps_placeholder(self):

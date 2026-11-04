@@ -72,5 +72,21 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(customers[0][4], "2025-01-10")  # first paid still from full history
 
 
+    def test_dashboard_csvs(self):
+        import csv as _csv, tempfile
+        rows = [line("2025-03-01", "SHOP", "S1", 10, sp="JOAN MBABAZI"),
+                line("2025-04-01", "SHOP", "S2", 20, invoice="I2", sp="Former Rep"),
+                line("2025-04-02", "SHOP", "S2", -5, qty=-1, doc_type="creditnote", invoice="cn", sp="")]
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = F.write_dashboard_csvs(F.prepare(rows), tmp)
+            read = lambda n: list(_csv.DictReader(open(paths[n])))
+            sales = read("sales_lines")
+            self.assertEqual([s["inv"] for s in sales], ["0", "1", "-1"])
+            self.assertEqual(read("customers")[0]["bdm"], "JOAN MBABAZI")
+            self.assertEqual(read("customers")[0]["first_purchase"], "2025-03-01")
+            self.assertEqual([(l["sid"], l["listed_on"]) for l in read("listings")], [("1", "2025-04-01")])
+            self.assertEqual(read("invoices")[1]["invoice_id"], "I2")
+
+
 if __name__ == "__main__":
     unittest.main()
