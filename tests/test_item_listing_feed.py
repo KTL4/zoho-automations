@@ -18,12 +18,13 @@ def run(rows, sales_from="2000-01-01", orders_from="2000-01-01"):
 
 
 class FeedTests(unittest.TestCase):
-    def test_other_brands_and_zero_lines_dropped(self):
+    def test_other_brands_grouped_zero_and_charge_lines_dropped(self):
         customers, items, _l, _o, sales = run([line("2026-01-02", "A", "S1", 100),
-                                               line("2026-01-02", "A", "S2", 100, brand="OTHER"),
-                                               line("2026-01-02", "A", "S3", 0, qty=0)])
-        self.assertEqual([i[0] for i in items], ["S1"])
-        self.assertEqual(len(sales), 1)
+                                               line("2026-01-02", "A", "S2", 100, brand="Bella Flora"),
+                                               line("2026-01-02", "A", "S3", 0, qty=0),
+                                               line("2026-01-02", "A", "SHIPPING CHARGES", 5000, qty=0, brand="")])
+        self.assertEqual([(i[0], i[2]) for i in items], [("S1", "UBL"), ("S2", "OTHERS")])
+        self.assertEqual(len(sales), 2)
 
     def test_bdm_is_latest_active_bdm_else_unassigned(self):
         customers, *_ = run([line("2026-01-01", "A", "S1", 10, sp="JOAN MBABAZI"),
@@ -60,7 +61,7 @@ class FeedTests(unittest.TestCase):
                 line("2026-01-03", "A", "S1", -30, qty=-1, doc_type="creditnote", invoice="cn1")]
         *_, orders, sales = run(rows)
         inv, cn = orders
-        self.assertEqual((inv[0], inv[4], inv[7], inv[8], inv[10]), (1, "Invoice", 140, 40, 100))
+        self.assertEqual((inv[0], inv[4], inv[7], inv[8], inv[10], inv[11]), (1, "Invoice", 140, 40, 100, 0))
         self.assertEqual((cn[0], cn[3], cn[4], cn[7]), ("", "", "Credit note", -30))
         self.assertEqual(sum(s[4] for s in sales), 110)
 

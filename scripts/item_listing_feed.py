@@ -14,7 +14,9 @@ Output: reports/ITEM_LISTING_FEED.xlsx, sheets (all formatted as Excel tables):
                with the listing date and whether it counts as a new listing
 
 Rules (from the project's instructions):
-  - Brands AIWIBI, AIWINA and UBL only; lines with Total = 0 and Quantity = 0 dropped.
+  - Brands AIWIBI, AIWINA and UBL, with every other brand grouped as OTHERS;
+    lines with Total = 0 and Quantity = 0, and the ledger's shipping /
+    adjustment rows (not items), dropped.
   - Credit notes: negative lines; no order number.
   - Order = Invoice ID + Customer + Date (old invoice ids lost precision).
   - BDM = the active BDM on the customer's most recent invoice sold by an
@@ -43,7 +45,10 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 import sales_ledger as ledger
 
-BRANDS = ("AIWIBI", "AIWINA", "UBL")
+FOCUS_BRANDS = ("AIWIBI", "AIWINA", "UBL")
+OTHERS = "OTHERS"
+BRANDS = FOCUS_BRANDS + (OTHERS,)  # every other brand is grouped as OTHERS
+CHARGE_SKUS = ("SHIPPING CHARGES", "ADJUSTMENT")  # the ledger's document-level rows, not items
 ACTIVE_BDMS = ("SAM AGABA", "PROMISE PRISCILLAR", "MOREEN NAHWERA", "RAYMOND MPAMIZO", "GEOFREY OGEN",
                "MARGARET KIRABO NAMALE", "DAVID ARUO OCAN", "EDDY WAMBUZI", "PASORINE AGABA", "JOAN MBABAZI")
 CARREFOUR_PREFIX = "MAJID AL FUTTAIM"
@@ -58,12 +63,14 @@ def prepare(rows):
     """Ledger rows -> cleaned lines (dicts), oldest first."""
     out = []
     for r in rows:
-        brand = (r["brand"] or "").strip().upper()
-        if brand not in BRANDS:
-            continue
         total, qty = num(r["total"]), num(r["quantity"])
         if total == 0 and qty == 0:
             continue
+        if qty == 0 and r["sku"].strip() in CHARGE_SKUS:
+            continue  # shipping / adjustment: not an item, so no listing or SKU
+        brand = (r["brand"] or "").strip().upper()
+        if brand not in FOCUS_BRANDS:
+            brand = OTHERS
         is_credit = r["doc_type"] == "creditnote" or (total < 0 and not r["invoice_id"])
         out.append({"date": r["date"], "customer": r["customer"].strip(), "sku": r["sku"].strip(),
                     "item": r["item_name"], "brand": brand, "category": r["category"],
@@ -121,7 +128,7 @@ def build(lines, sales_from, orders_from):
     for c in customers:
         fb = first_paid_brand.get(c, {})
         customer_rows.append((cust_no[c], c, bdm.get(c, "Unassigned"), first_any[c], first_paid.get(c),
-                              fb.get("AIWIBI"), fb.get("AIWINA"), fb.get("UBL"), last_paid.get(c)))
+                              *(fb.get(b) for b in BRANDS), last_paid.get(c)))
     item_rows = sorted((sku, *meta) for sku, meta in items.items())
     order_rows, number = [], 0
     for (inv, c, d), o in sorted(orders.items(), key=lambda kv: (kv[0][2], kv[0][1], kv[0][0])):
@@ -178,7 +185,7 @@ def write_dashboard_csvs(lines, out_dir):
     notes), customers (cid, customer, bdm, first_purchase), items (sid, sku,
     item_name, brand, category), listings (cid, sid, listed_on: only pairs
     that count as new listings) and invoices (inv, invoice_id). Full history,
-    focus brands only. Returns {name: path}."""
+    with brands outside AIWIBI / AIWINA / UBL as OTHERS. Returns {name: path}."""
     customers = sorted({l["customer"] for l in lines})
     cid = {c: i for i, c in enumerate(customers)}
     items_meta = {}
@@ -237,7 +244,7 @@ def main(org=None, output_path=OUTPUT_PATH, today=None):
     orders_from = date(year - 1, 1, 1).isoformat()  # plus the 365-day "gone quiet" look-back
     customers, items, listings, orders, sales = build(lines, sales_from, orders_from)
     info = [("Built", today.isoformat()), ("Data through", data_through),
-            ("Sales detail from", sales_from), ("Orders detail from", orders_from), ("Brands", ", ".join(BRANDS)),
+            ("Sales detail from", sales_from), ("Orders detail from", orders_from), ("Brands", ", ".join(FOCUS_BRANDS) + "; every other brand as OTHERS"),
             ("Customers", len(customers)), ("Items", len(items)), ("Listings (customer-SKU pairs)", len(listings)),
             ("Orders", len(orders)), ("Sales lines", len(sales)),
             ("Credit notes", "Negative Sales lines; on Orders, one 'Credit note' row per customer per day with no Order number"),
@@ -248,9 +255,9 @@ def main(org=None, output_path=OUTPUT_PATH, today=None):
     write(output_path, info, [
         ("Sales", ["Date", "Cust", "SKU", "Qty", "Total"], sales, (0,)),
         ("Orders", ["Order", "Date", "Cust", "Invoice ID", "Type", "Lines", "Qty", "Value",
-                    "Value AIWIBI", "Value AIWINA", "Value UBL"], orders, (1,)),
-        ("Customers", ["Cust", "Customer", "BDM", "First bought", "First paid", "First paid AIWIBI",
-                       "First paid AIWINA", "First paid UBL", "Last paid"], customers, (3, 4, 5, 6, 7, 8)),
+                    *(f"Value {b}" for b in BRANDS)], orders, (1,)),
+        ("Customers", ["Cust", "Customer", "BDM", "First bought", "First paid",
+                       *(f"First paid {b}" for b in BRANDS), "Last paid"], customers, (3, 4, 5, 6, 7, 8, 9)),
         ("Items", ["SKU", "Item Name", "Brand", "Category"], items, ()),
         ("Listings", ["Cust", "SKU", "Listed on", "Last bought", "Counts as listing"], listings, (2, 3)),
     ])
