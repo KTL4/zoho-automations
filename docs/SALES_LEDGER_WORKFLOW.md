@@ -29,13 +29,13 @@ It holds only what the ITEM LISTING dashboard needs, as Excel tables:
 | Sheet | What it holds |
 |---|---|
 | **Sales** | Daily customer × SKU quantity and total, from 1 Jul of last year |
-| **Orders** | One row per order, from 1 Jan of last year. Value is split by brand. Credit notes are one row per customer per day, with no order number. |
+| **Orders** | One row per order, from 1 Jan of last year. Value is split by brand (AIWIBI, AIWINA, UBL, OTHERS). Credit notes are one row per customer per day, with no order number. |
 | **Customers** | Assigned BDM; first bought, first paid (overall and per brand) and last paid, all from the full history |
 | **Items** | SKU, Item Name, Brand, Category |
 | **Listings** | Every customer–SKU pair since Dec 2019, with listing date, last bought and whether it counts as a new listing |
 
 The rules are the project's own:
-- **Brands:** AIWIBI, AIWINA and UBL only.
+- **Brands:** AIWIBI, AIWINA and UBL, with every other brand grouped as OTHERS. Shipping and adjustment rows are left out, since they aren't items.
 - **Order:** Invoice ID + Customer + Date.
 - **BDM:** the active BDM on the customer's most recent sale, else Unassigned.
 - **Listing:** the first paid purchase of a customer–SKU pair, on a day after the customer's first paid purchase day.
