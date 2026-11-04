@@ -1,9 +1,11 @@
 name: Item Runway Weekly Report
 
 on:
-  schedule:
-    # 03:00 UTC every Sunday = 06:00 East Africa Time
-    - cron: "0 3 * * 0"
+  # Paused 2026-11-04 at the user's request. Uncomment the schedule block
+  # below to resume automatic weekly runs. workflow_dispatch (manual runs)
+  # still works while paused.
+  # schedule:
+  #   - cron: "0 3 * * 0"  # 03:00 UTC every Sunday = 06:00 East Africa Time
   workflow_dispatch:
     inputs:
       as_of_date:
