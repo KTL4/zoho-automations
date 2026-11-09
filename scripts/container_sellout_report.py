@@ -76,7 +76,7 @@ Optional environment variables:
                                          count); blank or 0 = no limit. Never
                                          applied to a full refresh run.
     LOTS_REFRESH_DAYS                  - incremental runs re-pull only lots
-                                         dated within this many days, default 365
+                                         dated within this many days, default 180
     SALES_RECHECK_DAYS                 - incremental runs re-list only invoices
                                          dated within this many days, default 90
     FULL_REFRESH_DAYS                  - a full re-pull of every lot and invoice
@@ -86,8 +86,8 @@ Optional environment variables:
 
 Saving API calls: the full lot history (back to 2019 for KTL) is ~1,000
 calls, and most of it never changes -- FIFO consumes the oldest stock first,
-so a year-old lot is almost always sold out (2026-10-30: only 207 of 17,142
-lots older than 2025 had any stock left). So normal runs re-pull only the
+so older lots are mostly sold out (2026-11-09: 1,080 lots older than 180
+days still had stock, 51,560 units, out of ~22,500). So normal runs re-pull only the
 last LOTS_REFRESH_DAYS of lots and keep the older ones from data/, and only
 re-list the last SALES_RECHECK_DAYS of invoices for edits/voids. Every
 FULL_REFRESH_DAYS a run re-pulls everything, which catches the rare late
@@ -124,7 +124,7 @@ LOT_PAGE_PAUSE_SECONDS = 0.5
 LOT_RETRY_WAITS = (5, 8, 12, 20, 30, 45, 60, 60)
 SALES_CHUNK_SIZE = 300
 DEFAULT_TIME_BUDGET_MINUTES = 300
-DEFAULT_LOTS_REFRESH_DAYS = 365
+DEFAULT_LOTS_REFRESH_DAYS = 180  # 365 until 2026-11-09; owner chose 180 to save ~95 calls a week
 DEFAULT_SALES_RECHECK_DAYS = 90
 DEFAULT_FULL_REFRESH_DAYS = 28
 LOT_COLUMNS = ["date", "transaction_type", "transaction_number", "contact_name", "lot_number",

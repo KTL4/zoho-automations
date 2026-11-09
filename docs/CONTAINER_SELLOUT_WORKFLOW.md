@@ -55,15 +55,16 @@ Runs never overlap (`concurrency` group), because each run rewrites the sales ca
 | | Normal run | Full refresh |
 |---|---|---|
 | When | Every run, unless a full one is due | Every 28 days, or tick `full_refresh` on a manual run |
-| Lots re-pulled | Last 365 days (~7,000 lots for KTL) | All history (~27,000 lots, ~1,000 calls, ~1 hour) |
+| Lots re-pulled | Last 180 days (~3,500 lots, ~150 calls for KTL) | All history (~27,000 lots, ~1,000 calls, ~1 hour) |
 | Older lots | Kept from `data/fifo_lots_<org>.csv` | Re-pulled |
 | Invoices re-listed for edits/voids | Last 90 days | All history |
 | Invoice details fetched | Only new or edited invoices | Only new or edited invoices |
 
-FIFO uses up the oldest stock first, so lots more than a year old are
-almost always sold out (on 2026-10-30, 207 of 17,142 pre-2025 lots had any
-stock left, about 8,400 units). Their figures can lag by up to 28 days on a
-normal run. The state file `data/sellout_state_<org>.json` records the last
+FIFO uses up the oldest stock first, so older lots are mostly sold out. On
+2026-11-09, 1,080 lots older than 180 days still had stock (51,560 units);
+their on-hand figures can lag by up to 28 days on a normal run, until the
+next full refresh. (With the old 365-day window it was 546 lots, 34,922
+units; the owner chose 180 days to save ~95 calls a week.) The state file `data/sellout_state_<org>.json` records the last
 full refresh and whether the first invoice backfill has finished.
 
 ## 3. Commit
@@ -94,7 +95,7 @@ Download the latest file from `reports/` and save it to
 | `CONTAINER_SUPPLIER_PATTERNS` | UBL, Aiwibi, EFRIS STOCK names | Which contacts count as container suppliers |
 | `LOTS_FROM_DATE` | 2015-01-01 | Earliest lot to pull |
 | `SALES_FETCH_TIME_BUDGET_MINUTES` | 300 | Stop fetching invoices after this long and save progress |
-| `LOTS_REFRESH_DAYS` | 365 | Lots re-pulled on a normal run |
+| `LOTS_REFRESH_DAYS` | 180 (365 until 2026-11-09) | Lots re-pulled on a normal run |
 | `SALES_RECHECK_DAYS` | 90 | Invoices re-listed on a normal run |
 | `FULL_REFRESH_DAYS` | 28 | How often a full refresh runs |
 | `FULL_REFRESH` | workflow input | `true` forces a full refresh |
