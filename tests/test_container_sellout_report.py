@@ -142,7 +142,7 @@ class IncrementalRefreshTests(unittest.TestCase):
                 ("invoice", "old"): {"date": "2025-01-05", "modified": "m1", "lines": [("A1", "", 3.0)]},
                 ("invoice", "new"): {"date": "2026-10-01", "modified": "m1", "lines": [("A1", "", 2.0)]},
             })
-            listed = {"new": ("2026-10-01", "m1")}  # old invoice falls outside the listed window
+            listed = {"new": ("2026-10-01", "m1", "")}  # old invoice falls outside the listed window
             with patch.object(report, "list_documents", return_value=listed):
                 cache, complete = report.sync_sales(MagicMock(), "https://api", "42", MagicMock(), MagicMock(),
                                                     D(2026, 8, 1), time.monotonic() + 60)
@@ -213,6 +213,58 @@ class CallBudgetTests(unittest.TestCase):
         for _ in range(1000):
             budget.take()
         self.assertEqual(budget.used, 1000)
+
+
+class EditedInvoiceTests(unittest.TestCase):
+    def _sync(self, cache, listed, trust_totals=True):
+        fetched = []
+
+        def fetch_detail(*args, url, **kwargs):
+            fetched.append(url.rsplit("/", 1)[-1])
+            return {"line_items": [{"sku": "A1", "quantity": 9}]}
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(report, "DATA_DIR", tmp), \
+                patch.object(report, "list_documents", return_value=listed), \
+                patch.object(report.common, "fetch_detail", side_effect=fetch_detail):
+            report.save_cache(report.cache_path("42"), cache)
+            result, _ = report.sync_sales(MagicMock(), "https://api", "42", MagicMock(), MagicMock(),
+                                          D(2026, 8, 1), time.monotonic() + 60, trust_totals=trust_totals)
+            reloaded = report.load_cache(report.cache_path("42"))
+        return result, reloaded, fetched
+
+    def cached(self, total="1500.00"):
+        return {("invoice", "i1"): {"date": "2026-10-01", "modified": "m1", "total": total, "lines": [("A1", "", 3.0)]}}
+
+    def test_edit_with_same_date_and_total_is_not_refetched(self):
+        result, reloaded, fetched = self._sync(self.cached(), {"i1": ("2026-10-01", "m2", "1500.00")})
+        self.assertEqual(fetched, [])
+        self.assertEqual(result[("invoice", "i1")]["lines"], [("A1", "", 3.0)])
+        self.assertEqual(reloaded[("invoice", "i1")]["modified"], "m2")  # not re-checked again next week
+
+    def test_edit_that_changes_the_total_is_refetched(self):
+        result, reloaded, fetched = self._sync(self.cached(), {"i1": ("2026-10-01", "m2", "1800.00")})
+        self.assertEqual(fetched, ["i1"])
+        self.assertEqual(reloaded[("invoice", "i1")]["total"], "1800.00")
+        self.assertEqual(result[("invoice", "i1")]["lines"], [("A1", "", 9.0)])
+
+    def test_cache_saved_before_totals_existed_is_refetched_once(self):
+        _, reloaded, fetched = self._sync(self.cached(total=""), {"i1": ("2026-10-01", "m2", "1500.00")})
+        self.assertEqual(fetched, ["i1"])
+        self.assertEqual(reloaded[("invoice", "i1")]["total"], "1500.00")
+
+    def test_unchanged_invoice_picks_up_its_total_from_the_list(self):
+        _, reloaded, fetched = self._sync(self.cached(total=""), {"i1": ("2026-10-01", "m1", "1500.00")})
+        self.assertEqual(fetched, [])
+        self.assertEqual(reloaded[("invoice", "i1")]["total"], "1500.00")
+
+    def test_full_refresh_refetches_every_edit(self):
+        _, _, fetched = self._sync(self.cached(), {"i1": ("2026-10-01", "m2", "1500.00")}, trust_totals=False)
+        self.assertEqual(fetched, ["i1"])
+
+    def test_list_total_is_normalised(self):
+        self.assertEqual(report.money_text(1500), "1500.00")
+        self.assertEqual(report.money_text("1,500.5"), "1500.50")
+        self.assertEqual(report.money_text(None), "")
 
 
 class TokenHandlingTests(unittest.TestCase):

@@ -153,7 +153,8 @@ against the real Zoho UI report before trusting a run.
 `scripts/container_sellout_report.py`, run at 19:00 East Africa Time every
 Saturday by `.github/workflows/container-sellout-report.yml` (also runnable
 on demand from the Actions tab). A normal run makes ~300 Zoho API calls
-(286 on 2026-11-02) and takes under 10 minutes. Weekly runs are capped at 500 calls; the
+(a full week of invoices: 492 on 2026-11-07, ~400 expected after the
+"same total" check below) and takes about 10 minutes. Weekly runs are capped at 700 calls; the
 monthly full refresh is never capped. A Claude Code scheduled task at 19:10
 EAT starts the run if GitHub's schedule hasn't (see the workflow doc). Full walkthrough:
 `docs/CONTAINER_SELLOUT_WORKFLOW.md`.

@@ -3,8 +3,8 @@ name: Container Sellout Report
 on:
   schedule:
     # 16:00 UTC every Saturday = 19:00 East Africa Time (owner's choice,
-    # 2026-11-02). A normal run is ~300 Zoho API calls; the full refresh
-    # every 28 days is ~1,100.
+    # 2026-11-02). A weekly run is ~400 Zoho API calls; the full refresh
+    # every 28 days is ~1,100+.
     - cron: "0 16 * * 6"
   workflow_dispatch:
     inputs:
@@ -71,9 +71,9 @@ jobs:
           REPORT_AS_OF_DATE: ${{ inputs.as_of_date }}
           SALES_FETCH_TIME_BUDGET_MINUTES: "300"
           FULL_REFRESH: ${{ inputs.full_refresh }}
-          # Scheduled (weekly) runs are capped at 500 calls; a full refresh
-          # lifts the cap inside the script.
-          MAX_API_CALLS: ${{ github.event_name == 'schedule' && '500' || inputs.max_api_calls }}
+          # Scheduled (weekly) runs are capped at 700 calls (owner, 2026-11-09;
+          # a weekly run is ~400); a full refresh lifts the cap in the script.
+          MAX_API_CALLS: ${{ github.event_name == 'schedule' && '700' || inputs.max_api_calls }}
         run: python -u scripts/container_sellout_report.py
 
       - name: Commit report and data to repo
