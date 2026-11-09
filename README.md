@@ -152,9 +152,10 @@ against the real Zoho UI report before trusting a run.
 
 `scripts/container_sellout_report.py`, run at 19:00 East Africa Time every
 Saturday by `.github/workflows/container-sellout-report.yml` (also runnable
-on demand from the Actions tab). A normal run makes ~300 Zoho API calls
-(a full week of invoices: 492 on 2026-11-07, ~400 expected after the
-"same total" check below) and takes about 10 minutes. Weekly runs are capped at 700 calls; the
+on demand from the Actions tab). A weekly run is expected to make ~300 Zoho
+API calls (~150 for the last 180 days of lots, ~11 to list invoices, ~140
+for the week's new invoices); it made 492 on 2026-11-07, before the "same
+total" check and the 180-day lot window. It takes about 10 minutes. Weekly runs are capped at 700 calls; the
 monthly full refresh is never capped. A Claude Code scheduled task at 19:10
 EAT starts the run if GitHub's schedule hasn't (see the workflow doc). Full walkthrough:
 `docs/CONTAINER_SELLOUT_WORKFLOW.md`.
@@ -196,7 +197,7 @@ data behind any report can be checked.
 
 **Saving API calls:** the full lot history is ~1,000 calls for KTL, and
 almost all of it is old, sold-out stock that never changes. So a normal run
-re-pulls only the last 365 days of lots (`LOTS_REFRESH_DAYS`), keeps older
+re-pulls only the last 180 days of lots (`LOTS_REFRESH_DAYS`), keeps older
 lots from `data/fifo_lots_<org>.csv`, and re-lists only the last 90 days of
 invoices for edits/voids (`SALES_RECHECK_DAYS`). Every 28 days
 (`FULL_REFRESH_DAYS`), or when the `full_refresh` box is ticked on a manual

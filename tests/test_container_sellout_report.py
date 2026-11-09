@@ -346,7 +346,7 @@ class EndToEndTests(unittest.TestCase):
                 os.chdir(cwd)
 
         self.assertEqual(len(detail_calls), 1)
-        self.assertEqual(lot_pulls, ["2015-01-01", "2025-04-01"])  # full, then only the last 365 days
+        self.assertEqual(lot_pulls, ["2015-01-01", "2025-10-03"])  # full, then only the last 180 days
         self.assertEqual(state, {"last_full_refresh": "2026-04-01", "last_run": "2026-04-01",
                                  "sales_backfill_complete": True})
         sheet = wb["Containers"]
