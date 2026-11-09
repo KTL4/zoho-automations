@@ -21,9 +21,9 @@ How much of every container that has ever arrived has sold, and how fast.
 - Scheduled every **Saturday at 16:00 UTC** (19:00 EAT). Until 2026-11-02 it ran Mondays at 06:15 EAT.
 - GitHub can start scheduled runs late (the SOH report has seen delays of hours). So a **backup** Claude Code
   scheduled task fires at **19:10 EAT every Saturday**. If that Saturday's report isn't on `main` and no run is
-  in progress, it starts the workflow itself with `max_api_calls=500`. A scheduled run that starts late skips
+  in progress, it starts the workflow itself with `max_api_calls=700`. A scheduled run that starts late skips
   itself when that day's report already exists, so the two never both run.
-- **Call limit:** weekly runs (scheduled or started by the backup) stop before going over **500** Zoho API calls.
+- **Call limit:** weekly runs (scheduled or started by the backup) stop before going over **700** Zoho API calls (500 until 2026-11-09; the 7 Nov run used 492).
   The monthly full refresh (~1,100 calls) **always runs without a limit**: the script lifts it as soon as it
   sees a full refresh is due.
 - Manual: GitHub → Actions → *Container Sellout Report* → **Run workflow**.
@@ -98,7 +98,7 @@ Download the latest file from `reports/` and save it to
 | `SALES_RECHECK_DAYS` | 90 | Invoices re-listed on a normal run |
 | `FULL_REFRESH_DAYS` | 28 | How often a full refresh runs |
 | `FULL_REFRESH` | workflow input | `true` forces a full refresh |
-| `MAX_API_CALLS` | 500 on scheduled runs; workflow input `max_api_calls` on manual runs, blank = none. Never applied to a full refresh | Hard cap on Zoho API requests (retries count). On reaching it the run stops, keeps the invoices fetched so far, writes no report, and fails with "STOPPED: ... limit". Every run logs "Zoho API calls this run: N" |
+| `MAX_API_CALLS` | 700 on scheduled runs; workflow input `max_api_calls` on manual runs, blank = none. Never applied to a full refresh | Hard cap on Zoho API requests (retries count). On reaching it the run stops, keeps the invoices fetched so far, writes no report, and fails with "STOPPED: ... limit". Every run logs "Zoho API calls this run: N" |
 | `RATE_LIMIT_PER_MINUTE` | 60 | Zoho API calls per minute |
 
 ## Known quirks / design decisions
@@ -110,6 +110,11 @@ Download the latest file from `reports/` and save it to
   token once too many exist for one refresh token; the first live run
   (2026-10-29) crashed with a 401 that way. Tokens are refreshed only on a
   401 or a stale first page of the lot report.
+- **Edited invoices with the same date and total aren't re-downloaded** on a normal run. On 2026-11-07, 91 of
+  232 invoice downloads were older invoices whose only visible change was `last_modified_time` (most likely a
+  payment being recorded). The list call already returns each invoice's total, so this check costs nothing. A
+  full refresh re-downloads every edited invoice, which catches the rare edit that changes items but keeps the
+  exact same total.
 - **Credit notes are inward lots**, not negative sales (8,215 of KTL's
   lots are credit notes), so they are not subtracted from sales.
 

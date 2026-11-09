@@ -130,7 +130,7 @@ DEFAULT_FULL_REFRESH_DAYS = 28
 LOT_COLUMNS = ["date", "transaction_type", "transaction_number", "contact_name", "lot_number",
                "sku", "item_name", "quantity_in", "quantity_on_hand", "unit_cost"]
 DATA_DIR = "data"
-CACHE_COLUMNS = ["doc_type", "doc_id", "doc_date", "last_modified_time", "sku", "item_id", "quantity"]
+CACHE_COLUMNS = ["doc_type", "doc_id", "doc_date", "last_modified_time", "total", "sku", "item_id", "quantity"]
 
 # (doc_type, list path, list key, id field, detail key). Credit notes are
 # left out on purpose -- see the module docstring.
@@ -340,8 +340,9 @@ def is_container_lot(lot, patterns):
 # ---------------------------------------------------------------- phase 2: sales
 
 def list_documents(session, api_domain, organization_id, token_store, path, list_key, id_field, since):
-    """{doc_id: (date, last_modified_time)} for non-draft, non-void documents
-    dated on/after `since`. Newest-first so pagination stops at `since`."""
+    """{doc_id: (date, last_modified_time, total)} for non-draft, non-void
+    documents dated on/after `since`. Newest-first so pagination stops at
+    `since`."""
     docs = {}
     page = 1
     while True:
@@ -373,11 +374,19 @@ def list_documents(session, api_domain, organization_id, token_store, path, list
             if (doc.get("status") or "").strip().lower() in common.EXCLUDED_INVOICE_STATUSES:
                 continue
             if doc.get(id_field):
-                docs[str(doc[id_field])] = (doc_date.isoformat(), str(doc.get("last_modified_time") or ""))
+                docs[str(doc[id_field])] = (doc_date.isoformat(), str(doc.get("last_modified_time") or ""),
+                                            money_text(doc.get("total")))
         if reached_start or not (payload.get("page_context") or {}).get("has_more_page"):
             break
         page += 1
     return docs
+
+
+def money_text(value):
+    """A document total as a stable string, or "" when the list didn't give one."""
+    if value is None or str(value).strip() == "":
+        return ""
+    return f"{to_number(value):.2f}"
 
 
 def cache_path(organization_id):
@@ -385,14 +394,16 @@ def cache_path(organization_id):
 
 
 def load_cache(path):
-    """{(doc_type, doc_id): {"date", "modified", "lines": [(sku, item_id, qty)]}}"""
+    """{(doc_type, doc_id): {"date", "modified", "total", "lines": [(sku, item_id, qty)]}}
+    "total" is "" for documents cached before totals were recorded."""
     cache = {}
     if not os.path.exists(path):
         return cache
     with open(path, newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             key = (row["doc_type"], row["doc_id"])
-            entry = cache.setdefault(key, {"date": row["doc_date"], "modified": row["last_modified_time"], "lines": []})
+            entry = cache.setdefault(key, {"date": row["doc_date"], "modified": row["last_modified_time"],
+                                           "total": row.get("total") or "", "lines": []})
             if row["sku"] or row["item_id"]:
                 entry["lines"].append((row["sku"], row["item_id"], to_number(row["quantity"])))
     return cache
@@ -408,7 +419,8 @@ def save_cache(path, cache):
         for (doc_type, doc_id), entry in sorted(cache.items(), key=lambda kv: (kv[1]["date"], kv[0])):
             lines = entry["lines"] or [("", "", 0)]  # placeholder so an empty document stays "fetched"
             for sku, item_id, qty in lines:
-                writer.writerow([doc_type, doc_id, entry["date"], entry["modified"], sku, item_id, qty])
+                writer.writerow([doc_type, doc_id, entry["date"], entry["modified"], entry.get("total", ""),
+                                 sku, item_id, qty])
     os.replace(tmp, path)
 
 
@@ -421,10 +433,12 @@ def document_lines(detail):
     return lines
 
 
-def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, since, deadline):
+def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, since, deadline, trust_totals=True):
     """Brings the cached sales lines up to date. Only documents dated on or
     after `since` are listed, checked for edits/voids and fetched; cached
-    documents older than that are kept as they are. Returns (cache, complete)."""
+    documents older than that are kept as they are. With trust_totals off
+    (full refreshes), every edited document is re-fetched. Returns
+    (cache, complete)."""
     path = cache_path(organization_id)
     cache = load_cache(path)
     complete = True
@@ -439,12 +453,33 @@ def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, 
             continue
 
         # Drop cached documents in the listed window that were since
-        # voided/deleted or edited.
+        # voided/deleted or edited. A document whose last_modified_time moved
+        # but whose date and total did not is kept without re-fetching: on
+        # 2026-11-07, 91 of 232 re-fetches were invoices like that (most
+        # likely a payment being recorded), ~90 calls a week for nothing.
+        # An edit that changes the lines but keeps the exact same total is
+        # missed until the next full refresh re-lists and re-checks.
         since_text = since.isoformat()
+        kept_unchanged = 0
         for key in [k for k in cache if k[0] == doc_type and cache[k]["date"] >= since_text]:
             current = listed.get(key[1])
-            if current is None or current[1] != cache[key]["modified"]:
+            entry = cache[key]
+            if current is None:
                 del cache[key]
+            elif current[1] == entry["modified"]:
+                if not entry.get("total"):
+                    entry["total"] = current[2]  # free from the list; cached before totals were kept
+            else:
+                date_same = current[0] == entry["date"]
+                total_same = bool(entry.get("total")) and current[2] == entry["total"]
+                if trust_totals and date_same and total_same:
+                    entry["modified"] = current[1]
+                    kept_unchanged += 1
+                else:
+                    del cache[key]
+        if kept_unchanged:
+            print(f"{list_path}: {kept_unchanged} edited but with the same date and total; kept without re-fetching",
+                  flush=True)
 
         todo = sorted((doc_id for doc_id in listed if (doc_type, doc_id) not in cache), key=lambda d: listed[d][0])
         print(f"{list_path}: {len(listed)} since {since}, {len(todo)} to fetch ({len(listed) - len(todo)} cached)", flush=True)
@@ -466,8 +501,9 @@ def sync_sales(session, api_domain, organization_id, token_store, rate_limiter, 
                 break
             chunk = todo[start:start + SALES_CHUNK_SIZE]
             for doc_id, detail in common.fetch_concurrently(chunk, fetch_one, f"{detail_key} detail"):
-                doc_date, modified = listed[doc_id]
-                cache[(doc_type, doc_id)] = {"date": doc_date, "modified": modified, "lines": document_lines(detail)}
+                doc_date, modified, total = listed[doc_id]
+                cache[(doc_type, doc_id)] = {"date": doc_date, "modified": modified, "total": total,
+                                             "lines": document_lines(detail)}
             save_cache(path, cache)
             if any((doc_type, d) not in cache for d in chunk):
                 complete = False  # some fetches failed after retries; retried next run
@@ -855,7 +891,8 @@ def run(budget):
         sales_since = max(first_lot, as_of - timedelta(days=int(os.environ.get("SALES_RECHECK_DAYS") or DEFAULT_SALES_RECHECK_DAYS)))
     print(f"Phase 2: invoices since {sales_since}", flush=True)
     deadline = started + budget_min * 60
-    cache, sales_complete = sync_sales(session, api_domain, organization_id, token_store, rate_limiter, sales_since, deadline)
+    cache, sales_complete = sync_sales(session, api_domain, organization_id, token_store, rate_limiter, sales_since,
+                                       deadline, trust_totals=not full)
     if sales_since == first_lot:
         state["sales_backfill_complete"] = sales_complete
     if full:
