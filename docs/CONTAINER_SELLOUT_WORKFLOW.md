@@ -22,7 +22,9 @@ How much of every container that has ever arrived has sold, and how fast.
 - GitHub can start scheduled runs late (the SOH report has seen delays of hours). So a **backup** Claude Code
   scheduled task fires at **19:10 EAT every Saturday**. If that Saturday's report isn't on `main` and no run is
   in progress, it starts the workflow itself with `max_api_calls=700`. A scheduled run that starts late skips
-  itself when that day's report already exists, so the two never both run.
+  itself when a report for today or yesterday (EAT) already exists, so the two never both run. GitHub has started
+  the schedule 3-5 hours late, after midnight EAT; until 28 Nov the check looked at "today" only, and on 22 Nov a
+  late run repeated Saturday's run (`reports/Container_Sellout_22_11_2026.xlsx`).
 - **Call limit:** weekly runs (scheduled or started by the backup) stop before going over **700** Zoho API calls (500 until 2026-11-09; the 7 Nov run used 492).
   The monthly full refresh (~1,100 calls) **always runs without a limit**: the script lifts it as soon as it
   sees a full refresh is due.

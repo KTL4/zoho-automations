@@ -44,13 +44,22 @@ jobs:
 
       # A late-starting scheduled run must not repeat a run the backup
       # trigger (a Claude Code scheduled task at 19:10 EAT) already did.
-      - name: Skip if today's report already exists
+      # GitHub has started the 19:00 EAT schedule 3-5 hours late, i.e. after
+      # midnight EAT, so yesterday's report counts too (on 22 Nov a run at
+      # 00:25 EAT checked only "today" and repeated Saturday's run). The
+      # schedule is weekly, so a report from yesterday always means this
+      # week's run is done.
+      - name: Skip if this week's report already exists
         id: guard
         run: |
-          today=$(TZ=Africa/Nairobi date +%d_%m_%Y)
-          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "reports/Container_Sellout_${today}.xlsx" ]; then
-            echo "Report for ${today} already exists; skipping this scheduled run."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            for day in "$(TZ=Africa/Nairobi date +%d_%m_%Y)" "$(TZ=Africa/Nairobi date -d yesterday +%d_%m_%Y)"; do
+              if [ -f "reports/Container_Sellout_${day}.xlsx" ]; then
+                echo "Report for ${day} already exists; skipping this scheduled run."
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                break
+              fi
+            done
           fi
 
       - uses: actions/setup-python@v5
